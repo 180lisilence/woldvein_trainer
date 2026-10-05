@@ -62,6 +62,7 @@ a = Analysis(
         'src.hotkey_conflict',
         'src.theme_manager',
         'src.crash_report',
+        'src.perf_optimizer',
         'tkinter.simpledialog',
     ],
     hookspath=[],

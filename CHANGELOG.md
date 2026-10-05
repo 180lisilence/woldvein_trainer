@@ -1,4 +1,41 @@
-﻿# 平野孤鸿项目变更日志
+# 平野孤鸿项目变更日志
+
+## v0.4.9 (2026-10-05)
+
+### 新增
+- **引擎性能优化模块**（`src/perf_optimizer.py`）：针对西山居 KG3D 引擎，改写游戏 `configs\config.ini`
+  里出厂被锁死的性能参数。三档可选（保守 / 均衡 / 极致），线程数与内存上限按本机硬件自动计算。
+- **优化面板**：侧边栏独立导航「⚡ 优化」（`_build_sidebar` 的 NAV_ITEMS 第 4 项），
+  下分 4 个子项 —— 优化档位 / 改动明细 / 系统侧优化 / 还原。
+  每个子页顶部共用本机硬件与当前档位状态条，底部共用说明。
+- 单元测试 `tests/test_perf_optimizer.py`：18 项，覆盖 ini 字节级最小侵入、profile 数据完整性、
+  公开 API 契约、UI 面板构造冒烟。
+
+### 优化依据（逆向证据）
+- `KG3DEngineX64.dll` 的 `GetInt(section, key, default)` 调用现场抓到出厂默认值：
+  `MinWorkSet=600` `MaxWorkSet=1400` `NumCpuThread=1` `UseMultiThreadCull=0`
+  `UseMultiThreadLoad=0` `bMultiThreadLoadAnimation=0` `bEnableModelLod=0` `UseProgressMeshLOD=0`。
+- 隐藏开关 `bDisableDynamicScale`：exe 在 `0x371123` 用 `GetPrivateProfileIntA` 从 `[KG3DENGINE]` 读取，
+  但 config.ini 里原本没有这一项 → 引擎按默认 0 处理 = 动态分辨率缩放常开，画面被压糊。
+- 已验证**没有任何模块对 config.ini 做 WritePrivateProfileStringA**，改值不会被游戏写回覆盖。
+- 证伪：`config.cfg` 的 `LogicFrame` / `RenderFrame` 无任何代码读取，改它不会解锁帧率。
+
+### 技术要点
+- ini 写入为字节级最小侵入：保留行尾符与全部非 ASCII 字节，实测 283→284 行、CRLF 全保留。
+- 首次改动前自动备份原始 config.ini，还原走同一份备份索引。
+- 应用状态记在 `_applied_state.json`，避免"动态值每次微调导致档位判定失效"。
+- 双显卡笔记本支持：写 `HKCU\Software\Microsoft\DirectX\UserGpuPreferences` 强制 `GpuPreference=2`。
+
+### 导航索引重排（改 sidebar 时必读）
+侧边栏插入「优化」后，原「存档/监控/内部」顺延一位，**设置由 6 变为 7**。
+同步改动四处，缺一就会点错页：
+`_build_sidebar` 的 NAV_ITEMS、settings 按钮的 `_switch_nav(7)`、
+`func_data` 的键重编号、`_update_action_panel` 的 nav 分支。
+测试 `test_no_empty_nav_page` 会遍历全部导航索引，防止重排后出现白屏页。
+
+### 版本
+- `APP_VERSION` / `trainer_version` / 安装包版本号全部 0.4.8 → 0.4.9。
+- v0.4.8 的注入器 / 修改器拆分结构保持不变，调用契约未动。
 
 ## v0.4.6 (2026-09-27)
 
