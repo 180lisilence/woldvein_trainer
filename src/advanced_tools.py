@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 woldvein Trainer v0.3 - 高级工具模块
@@ -33,6 +33,9 @@ if PROJECT_ROOT not in sys.path:
 
 from src.lua_engine import execute_lua_safe, execute_lua_retry
 from src.logger import log, log_success, log_error, log_warning
+
+# 代码重构：从 cheat_tools 导入重复函数，消除重复定义
+from src.cheat_tools import max_all_talents as _cheat_max_all_talents
 
 from src.constants import (
     APP_VERSION,
@@ -2277,6 +2280,9 @@ def boom_upgrade_step(target=0):
     每级都会调用 UI2S_BoomUpgradeCallback 发放该级解锁项（建筑卡/谋士/天赋/载具/功能/剧情）。
     """
     log("正在逐级晋升城市品阶（含解锁流程）...")
+    from .input_validator import clamp_int
+    if target != 0:
+        target = clamp_int(target, 1, 14)
     code = _boom_lua(LUA_BOOM_UPGRADE_STEP).replace("__TARGET__", str(int(target)))
     success, result = execute_lua_retry(code, timeout=30.0, attempts=2, tag="品阶晋升")
     return _log_result(success, result, "品阶晋升失败")

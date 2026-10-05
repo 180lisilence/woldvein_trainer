@@ -44,6 +44,69 @@ _config_dir = runtime_config_dir()
 os.makedirs(_config_dir, exist_ok=True)
 CONFIG_PATH = os.path.join(_config_dir, "config.json")
 
+# === 配置缓存与延时写入 ===
+_cached_config = None       # 内存中的配置缓存
+_config_dirty = False       # 是否有未写入的变更
+_save_timer = None          # 延时写入定时器
+_SAVE_DELAY_MS = 500        # 延时写入间隔（毫秒），合并频繁修改
+
+
+def _schedule_delayed_save():
+    """延时保存：标记脏数据，500ms 后真正写入（合并频繁修改）"""
+    global _config_dirty, _save_timer
+    _config_dirty = True
+    if _save_timer is not None:
+        try:
+            _save_timer.cancel()
+        except Exception:
+            pass
+    import threading
+    _save_timer = threading.Timer(_SAVE_DELAY_MS / 1000.0, _do_delayed_save)
+    _save_timer.daemon = True
+    _save_timer.start()
+
+
+def _do_delayed_save():
+    """真正执行延时写入"""
+    global _config_dirty, _cached_config, _save_timer
+    _save_timer = None
+    if not _config_dirty or _cached_config is None:
+        return
+    try:
+        from .atomic_file import atomic_write_json
+        parent = os.path.dirname(CONFIG_PATH)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        atomic_write_json(CONFIG_PATH, _cached_config)
+        _config_dirty = False
+    except Exception as e:
+        _safe_print(f"[Config] 延时保存失败: {e}")
+
+
+def flush_config():
+    """强制将缓存中的配置写入磁盘（程序退出时调用）"""
+    global _config_dirty, _save_timer
+    if _save_timer is not None:
+        try:
+            _save_timer.cancel()
+        except Exception:
+            pass
+        _save_timer = None
+    if _config_dirty and _cached_config is not None:
+        try:
+            from .atomic_file import atomic_write_json
+            parent = os.path.dirname(CONFIG_PATH)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            atomic_write_json(CONFIG_PATH, _cached_config)
+            _config_dirty = False
+        except Exception as e:
+            _safe_print(f"[Config] 强制保存失败: {e}")
+
+
+import atexit
+atexit.register(flush_config)
+
 # 默认配置：所有可配置项的默认值
 # 用户配置文件中缺少的键会从这里补全（深合并）
 DEFAULT_CONFIG = {
@@ -113,54 +176,74 @@ def _safe_print(msg):
         pass
 
 
-def load_config():
+def load_config(use_cache=True):
     """
     加载配置文件。
+
+    参数：
+        use_cache: 是否使用内存缓存（默认True）
 
     返回：
         配置字典（已与默认配置深合并，嵌套缺键不会崩溃）
 
     处理逻辑：
-        1. 配置文件存在 → 读取JSON → 深合并默认配置
-        2. 配置文件不存在或损坏 → 返回默认配置的深拷贝
-        3. JSON解析失败 → 打印警告，返回默认配置
+        1. 内存缓存命中 → 直接返回缓存的深拷贝
+        2. 配置文件存在 → 读取JSON → 深合并默认配置 → 缓存
+        3. 配置文件不存在或损坏 → 返回默认配置的深拷贝 → 缓存
     """
+    global _cached_config
+    if use_cache and _cached_config is not None:
+        return copy.deepcopy(_cached_config)
+
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
             if not isinstance(cfg, dict):
-                # 配置文件内容不是字典，使用默认配置
-                return copy.deepcopy(DEFAULT_CONFIG)
-            # 深合并：用户配置覆盖默认，嵌套字典逐键补全
-            return _deep_merge(DEFAULT_CONFIG, cfg)
+                cfg = copy.deepcopy(DEFAULT_CONFIG)
+            else:
+                cfg = _deep_merge(DEFAULT_CONFIG, cfg)
         except Exception as e:
             _safe_print(f"[Config] 加载配置失败: {e}，使用默认配置")
-    return copy.deepcopy(DEFAULT_CONFIG)
+            cfg = copy.deepcopy(DEFAULT_CONFIG)
+    else:
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+
+    _cached_config = cfg
+    return copy.deepcopy(_cached_config)
 
 
-def save_config(config):
+def save_config(config, immediate=False):
     """
     保存配置到JSON文件。
 
     参数：
         config: 配置字典
+        immediate: 是否立即写入（默认False，延时500ms合并频繁修改）
 
     返回：
         True表示保存成功，False表示失败
 
     特点：
-        - ensure_ascii=False：中文不转义，可读性好
-        - indent=2：缩进格式化
-        - 自动创建目录
+        - 配置常驻内存缓存，避免重复读文件
+        - 默认延时500ms写入，合并频繁修改减少IO
+        - immediate=True 时立即写入（程序退出、重要变更）
+        - 原子写入防止文件损坏
     """
-    try:
-        parent = os.path.dirname(CONFIG_PATH)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+    global _cached_config, _config_dirty
+    _cached_config = copy.deepcopy(config)
+    if immediate:
+        try:
+            from .atomic_file import atomic_write_json
+            parent = os.path.dirname(CONFIG_PATH)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            atomic_write_json(CONFIG_PATH, _cached_config)
+            _config_dirty = False
+            return True
+        except Exception as e:
+            _safe_print(f'[Config] 保存配置失败: {e}')
+            return False
+    else:
+        _schedule_delayed_save()
         return True
-    except Exception as e:
-        _safe_print(f"[Config] 保存配置失败: {e}")
-        return False

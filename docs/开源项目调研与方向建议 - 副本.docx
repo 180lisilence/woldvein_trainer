@@ -1,0 +1,293 @@
+# 游戏修改器开源项目调研与方向建议
+
+> 调研时间：2026-09-26
+> 对标项目：REFramework、Cyber Engine Tweaks、UE4SS、CheatGear、YimMenu、PyMemoryEditor
+> 目的：从成熟开源项目中提取可借鉴的架构与功能经验，为 woldvein Trainer 后续版本寻找方向
+
+---
+
+## 一、对标项目概览
+
+| 项目 | 目标游戏/引擎 | 技术栈 | Stars | 核心定位 |
+|------|-------------|--------|-------|---------|
+| **REFramework** | Capcom RE Engine | C++ + Lua + ImGui | 3k+ | 通用 modding 框架，Lua 脚本生态 |
+| **Cyber Engine Tweaks** | 赛博朋克2077 (REDengine) | C++ + Lua + Dear ImGui | 2k+ | 脚本框架 + 游戏内控制台 + TweakDB 编辑 |
+| **UE4SS** | Unreal Engine 4/5 | C++ + Lua | 2k+ | Lua 脚本 + 实时属性查看器 + SDK 生成 |
+| **CheatGear** | Unity/Unreal 通用 | Rust + Lua | 新兴 | 内存编辑 + AI/MCP 自动化 + 自动偏移 |
+| **YimMenu** | GTA V | C++ + Lua | 2k+ | 游戏内菜单 + Lua 扩展生态 |
+| **PyMemoryEditor** | 通用 | Python (ctypes) | 500+ | Cheat Engine 风格的 Python 内存扫描库 |
+
+---
+
+## 二、可借鉴的核心经验
+
+### 2.1 通信层：从文件轮询到命名管道/共享内存
+
+**现状**：woldvein Trainer 使用 `lua_cmd.txt` / `lua_result.txt` 文件轮询，延迟百毫秒级。
+
+**对标项目做法**：
+- **REFramework**：DLL 直接注入游戏进程，Lua 在游戏主线程执行，Python 端通过命名管道与 DLL 通信，延迟毫秒级。
+- **Cyber Engine Tweaks**：使用共享内存 + 事件通知（Event Object），命令往返 < 5ms。
+- **UE4SS**：内部使用 named pipe 进行外部工具与游戏内 GUI 的通信。
+
+**借鉴建议**：
+- 保留文件轮询作为 fallback（调试方便、重启兼容）
+- 新增命名管道（Named Pipe）作为主通道：`\\.\pipe\woldvein_trainer`
+- Python 端 `CreateNamedPipe` + `ConnectNamedPipe`，DLL 端 `CreateFile` + `WriteFile`
+- 预期收益：命令往返延迟从 100-500ms 降至 5-20ms，资源刷新从 3 秒/次提升到 500ms/次
+
+**实施难度**：中等。DLL 端需新增管道客户端线程，Python 端需新增管道服务器。文件轮询保留作降级。
+
+---
+
+### 2.2 游戏内覆盖层（Overlay）：不用 Alt+Tab
+
+**现状**：woldvein Trainer 是独立窗口，操作需 Alt+Tab 切换。
+
+**对标项目做法**：
+- **REFramework**：Hook DirectX 11/12 `Present`，用 ImGui 在游戏画面上直接渲染 UI。按 Insert 键呼出，支持多标签页（ScriptRunner、Lua IDE、Game Object Browser）。
+- **Cyber Engine Tweaks**：同样 Hook DX12，overlay 包含 Console（Lua 实时执行）、Logs（日志）、TweakDB Editor、RTTI Inspector、Game State 可视化。
+- **UE4SS**：游戏内 GUI 包含 Live View（对象树）、Lua Debugger（断点/调用栈/REPL）、Console。
+
+**借鉴建议**：
+- 短期（v0.5）：实现最小 overlay —— Hook DX11 `Present`，用 ImGui 渲染一个简洁的资源条（金钱/木料/食物/水/人口/幸福度），固定在屏幕顶部，半透明，不可交互仅显示。
+- 中期（v0.6）：overlay 增加交互 —— 可点击按钮执行常用操作（一键资源+100万、创造模式开关、时间暂停），热键呼出/隐藏。
+- 长期（v0.7+）：完整游戏内控制台 —— Lua 实时执行、日志查看、对象浏览器。
+
+**实施难度**：高。需要逆向游戏的 DX 设备指针，ImGui 集成到 DLL 中。但 REFramework 和 CET 都是开源的，可以直接参考其 DX Hook 代码。
+
+---
+
+### 2.3 Lua 脚本生态：从硬编码到用户可扩展
+
+**现状**：woldvein Trainer 的所有 Lua 脚本硬编码在 Python 文件中（`advanced_tools.py`、`cheat_tools.py` 等），用户无法自定义。
+
+**对标项目做法**：
+- **REFramework**：`reframework/autorun/` 目录下的 `.lua` 文件自动加载；`re.on_frame(fn)`、`re.on_draw_ui(fn)` 等事件回调；`sdk.*` 命名空间访问游戏类型系统；`imgui.*` 构建游戏内 UI。脚本可热重载。
+- **Cyber Engine Tweaks**：`mods/` 目录，每个 mod 一个文件夹，`init.lua` 自动执行；`RegisterForEvent("onInit", fn)` 事件系统；`GetSingleton("gamePlayerSystem")` 访问游戏单例；`Game.GetPlayer()` 等便捷 API。
+- **UE4SS**：`Mods/` 目录，`Scripts/main.lua` 入口；`RegisterHook("/Script/...", function(self, ...) end)` 钩子系统；`FindFirstOf("ClassName")` 查找对象；`ExecuteInGameThreadWithDelay(fn, ms)` 延迟执行。
+
+**借鉴建议**：
+- 新增 `scripts/` 目录，用户放入 `.lua` 文件自动加载
+- 提供 Lua API 封装：
+  ```lua
+  -- 事件回调
+  wv.on_update(function() end)      -- 每帧调用
+  wv.on_resource_change(function(res, old, new) end)
+  
+  -- 游戏访问
+  wv.get_resource("money")          -- 获取资源
+  wv.set_resource("money", 999999)  -- 设置资源
+  wv.execute_lua("g_camp.m_nMoney = 1")  -- 执行原始 Lua
+  
+  -- UI（如果有 overlay）
+  wv.ui.button("一键满资源", function() end)
+  wv.ui.slider("时间速度", 0, 60, function(val) end)
+  ```
+- 脚本热重载：文件修改后自动重新加载
+- 预期收益：用户可以自己写脚本实现自定义功能（如"每天自动纳税"、"资源低于阈值自动补充"），减少核心开发压力
+
+**实施难度**：中等。需要在 DLL 端实现 Lua API 绑定，Python 端负责脚本管理。
+
+---
+
+### 2.4 实时属性查看器（Live Property Viewer）
+
+**现状**：woldvein Trainer 只能通过预定义的 Lua 脚本读取特定字段，无法探索游戏内未知对象。
+
+**对标项目做法**：
+- **UE4SS Live View**：以树状结构列出所有 UObject，可搜索、展开、编辑属性值。右键属性可以 "Watch" 监视变化。这是 modder 最常用的工具。
+- **Cyber Engine Tweaks RTTI Inspector**：浏览游戏的运行时类型信息，查看所有类、方法、属性。
+- **REFramework Game Object Browser**：遍历游戏对象树，查看/编辑字段。
+
+**借鉴建议**：
+- 新增「探查器」页面：
+  - 输入全局变量名（如 `g_camp`、`g_Time`、`g_LBuildingCardManager`），递归遍历其所有字段和方法
+  - 以树状结构展示，可展开/折叠
+  - 可编辑字段值（数字/字符串/布尔）
+  - 可 "监视" 字段，实时显示变化
+  - 导出探查结果为 JSON
+- 这对开发新功能极其有用 —— 不用再猜字段名，直接在游戏里看
+
+**实施难度**：中等。Lua 端用 `pairs()` 遍历 table，处理循环引用。Python 端用 Treeview 展示。
+
+---
+
+### 2.5 预设系统（Profiles / Presets）
+
+**现状**：每次使用都要手动点按钮，没有保存/加载配置的能力。
+
+**对标项目做法**：
+- **YimMenu**：支持保存/加载配置文件，所有设置（包括每个功能的开关状态、数值）序列化为 JSON。
+- **CheatGear**："修改预设与一键场景" —— 将多个修改项保存为预设方案，一键应用。
+
+**借鉴建议**：
+- 新增「预设」功能：
+  - 保存当前所有修改项状态为一个预设（JSON 文件）
+  - 预设列表："满资源开局"、"创造模式全开"、"纯建造辅助"、"时间冻结+无限资源" 等
+  - 一键应用预设
+  - 预设文件放在 `profiles/` 目录，可分享
+- 启动时自动加载上次使用的预设
+
+**实施难度**：低。就是序列化/反序列化当前 UI 状态。
+
+---
+
+### 2.6 AI 辅助 / MCP 集成
+
+**现状**：无 AI 功能。
+
+**对标项目做法**：
+- **CheatGear**：内置 MCP 服务器，可连接 Claude/Cursor 等 AI 助手，AI 可以直接锁定目标、运行 Lua 脚本、分析内存。
+- **Frida Game Hacking MCP**：通过 MCP 协议让 AI 助手执行内存扫描、Hook、代码注入。
+- **CET MCP**：Cyber Engine Tweaks 的 MCP 桥接，AI 通过 TCP 与游戏内 Lua VM 通信。
+
+**借鉴建议**：
+- 新增 `woldvein-mcp` 模块（可选，独立进程）：
+  - 实现 MCP 协议（stdio 或 TCP）
+  - 暴露工具：`get_game_status`、`execute_lua`、`scan_memory`、`set_resource`、`list_objects`
+  - AI 助手（Claude/Cursor）可以直接查询游戏状态、执行修改、探索游戏对象
+- 用例："帮我把金钱设为 100 万" → AI 调用 `set_resource("money", 1000000)`；"看看 g_camp 里有什么字段" → AI 调用 `list_objects("g_camp")` 并分析结果
+
+**实施难度**：中等偏高。但这是未来趋势，差异化竞争力强。
+
+---
+
+### 2.7 内存扫描与 AOB 搜索
+
+**现状**：所有偏移和全局变量名都是硬编码的，游戏更新后可能失效。
+
+**对标项目做法**：
+- **Cheat Engine / PyMemoryEditor**：支持值扫描（精确值、模糊值、增加/减少）、指针链解析、AOB（Array of Bytes）模式搜索。
+- **CheatGear**："自动偏移" —— 游戏更新后自动扫描定位关键函数地址。
+
+**借鉴建议**：
+- 新增「内存扫描」工具页：
+  - 值扫描：输入已知值 → 扫描 → 改变值 → 再扫描 → 缩小范围 → 得到地址
+  - AOB 搜索：输入字节模式（支持通配符 `??`），在游戏内存中搜索
+  - 指针链：从已知地址出发，追踪指针偏移
+- 特征码扫描增强：`lua_pcall` 导出找不到时，用 AOB 扫描自动定位
+- 扫描结果可保存为地址表，下次直接使用
+
+**实施难度**：高。但这是从"专用修改器"升级为"通用修改工具"的关键一步。
+
+---
+
+### 2.8 诊断与自助排查
+
+**现状**：出问题只能看日志，没有系统化的诊断工具。
+
+**对标项目做法**：
+- **REFramework**：内置 Lua IDE（语法高亮、自动补全、错误提示），脚本错误直接在游戏内显示。
+- **Cyber Engine Tweaks**：Logs 面板实时显示 Lua 错误，包含调用栈；TweakDB Editor 可验证修改是否生效。
+- **UE4SS**：Lua Debugger 支持断点、单步、变量查看。
+
+**借鉴建议**：
+- 增强「诊断」功能：
+  - Hook 健康检查：启动后自动检测 lua_pcall Hook 是否生效，失败则提示并自动回滚
+  - 诊断包导出：一键打包日志 + 配置 + 进程信息 + DLL 版本 + 游戏版本 + 最后执行的 Lua 命令
+  - 崩溃记录：游戏崩溃时记录最后执行的 Lua 命令和调用栈
+  - 常见问题自助排查：引导式检查（游戏是否运行 → DLL 是否注入 → Hook 是否生效 → Lua 是否可执行）
+
+**实施难度**：低-中等。大部分是已有功能的系统化包装。
+
+---
+
+### 2.9 多语言支持（i18n）
+
+**现状**：UI 全中文硬编码。
+
+**对标项目做法**：
+- **REFramework**：支持多语言，界面字符串从语言文件加载。
+- 大部分成熟项目都有 i18n 机制。
+
+**借鉴建议**：
+- 将 UI 字符串抽离到 `lang/zh.json`、`lang/en.json`
+- 设置页可切换语言
+- 预期收益：吸引非中文玩家，扩大用户群
+
+**实施难度**：低。就是字符串替换，但工作量大（需要逐个文件提取）。
+
+---
+
+### 2.10 项目架构层面的借鉴
+
+| 方面 | 对标项目最佳实践 | woldvein 现状 | 建议 |
+|------|----------------|-------------|------|
+| **注入方式** | REFramework 用 DLL 代理（dinput8.dll），游戏启动自动加载，无需手动注入 | 手动注入，需管理员权限 | 保留手动注入，新增 DLL 代理选项（放入游戏目录自动加载） |
+| **单例协调** | REFramework 有中心 `REFramework` 类管理所有子系统 | 各模块相对独立 | 引入中心协调器，统一管理注入/通信/状态 |
+| **事件系统** | CET/REFramework 都有事件回调（onInit/onUpdate/onShutdown） | 无统一事件系统 | 新增事件总线，模块间解耦通信 |
+| **配置管理** | YimMenu 配置全序列化，支持多 profile | config.json 但部分硬编码 | 所有 UI 状态可序列化，支持多配置文件 |
+| **日志系统** | CET 日志分级别，游戏内可查看 | 有日志但 UI 展示简单 | 增强日志面板，支持过滤/搜索/导出 |
+| **热键系统** | CET 热键可在 overlay 中可视化绑定 | 有热键但配置需独立工具 | 集成到设置页，可视化绑定 + 冲突检测 |
+
+---
+
+## 三、版本路线图建议
+
+### v0.5（短期，1-2周）— 稳定性与体验
+
+| 功能 | 优先级 | 难度 | 说明 |
+|------|--------|------|------|
+| 命名管道通信 | P0 | 中 | 替换文件轮询，延迟降至毫秒级 |
+| 预设系统 | P1 | 低 | 保存/加载修改配置 |
+| 诊断包导出 | P1 | 低 | 一键打包问题信息 |
+| Hook 健康检查 | P1 | 低 | 启动自动检测，失败自动回滚 |
+| 热键可视化绑定 | P2 | 低 | 设置页内直接改热键 |
+| 窗口大小/位置记忆 | P2 | 低 | 关闭时保存，启动时恢复 |
+
+### v0.6（中期，1个月）— 核心能力升级
+
+| 功能 | 优先级 | 难度 | 说明 |
+|------|--------|------|------|
+| 游戏内 Overlay（资源条） | P0 | 高 | DX Hook + ImGui，屏幕顶部显示资源 |
+| Lua 脚本生态 | P1 | 中 | scripts/ 目录自动加载，提供 Lua API |
+| 实时属性查看器 | P1 | 中 | 探查游戏对象，树状展示，可编辑 |
+| 操作历史与撤销 | P2 | 低 | 记录每次修改，支持撤销 |
+| 多语言支持 | P2 | 低 | i18n 框架 + 英文翻译 |
+
+### v0.7+（长期，2-3个月）— 差异化竞争力
+
+| 功能 | 优先级 | 难度 | 说明 |
+|------|--------|------|------|
+| 完整游戏内控制台 | P0 | 高 | Overlay 内 Lua 实时执行 + 日志 + 对象浏览器 |
+| MCP / AI 集成 | P1 | 高 | AI 助手直接操作游戏 |
+| 内存扫描与 AOB 搜索 | P1 | 高 | 从专用修改器升级为通用工具 |
+| 自动偏移扫描 | P2 | 高 | 游戏更新后自动定位关键函数 |
+| DLL 代理注入 | P2 | 中 | 放入游戏目录自动加载，无需手动注入 |
+
+---
+
+## 四、最值得立即做的三件事
+
+### 1. 命名管道通信（投入产出比最高）
+- **为什么**：当前文件轮询是最大的性能瓶颈，所有功能都受限于 100-500ms 延迟。改完后资源刷新可以从 3 秒/次提到 500ms/次，操作响应更跟手。
+- **怎么做**：参考 REFramework/CET 的命名管道实现，DLL 端新增管道客户端线程，Python 端新增管道服务器。文件轮询保留作 fallback。
+- **风险**：低。管道是 Windows 原生机制，成熟可靠。
+
+### 2. 预设系统（用户体验提升最明显）
+- **为什么**：用户每次打开都要重新点一遍按钮，非常繁琐。预设系统让"一键满资源+创造模式+时间暂停"变成一次点击。
+- **怎么做**：序列化当前所有修改项状态为 JSON，保存到 profiles/ 目录，启动时可选择加载。
+- **风险**：极低。纯 Python 层实现，不涉及 DLL。
+
+### 3. 实时属性查看器（开发效率提升最大）
+- **为什么**：目前添加新功能全靠猜字段名，效率极低。有了属性查看器，可以直接在游戏里探索 `g_camp`、`g_Time` 等对象的真实字段，新功能开发速度提升 10 倍。
+- **怎么做**：Lua 端递归遍历 table（处理循环引用），Python 端用 Treeview 展示，支持搜索/编辑/监视。
+- **风险**：低-中。主要工作量在 UI 展示和循环引用处理。
+
+---
+
+## 五、参考资源
+
+| 项目 | GitHub | 核心参考点 |
+|------|--------|-----------|
+| REFramework | github.com/praydog/REFramework | DX Hook + ImGui overlay + Lua API 设计 |
+| Cyber Engine Tweaks | github.com/maximegmd/CyberEngineTweaks | 游戏内控制台 + TweakDB 编辑 + RTTI |
+| UE4SS | github.com/UE4SS-RE/RE-UE4SS | Live Property Viewer + Lua Debugger |
+| CheatGear | cheatgear.com | AI/MCP 集成 + 自动偏移 |
+| YimMenu | github.com/YimMenu/YimMenu | 配置序列化 + Lua 扩展 |
+| PyMemoryEditor | github.com/JeanExtreme002/PyMemoryEditor | Python 内存扫描 API 设计 |
+
+---
+
+*报告版本：v1.0 | 调研日期：2026-09-26*

@@ -42,6 +42,176 @@ import threading
 from .logger import log, log_success, log_error, log_warning
 from .constants import LUA_TIMEOUT
 
+# ========== 命名管道通信（v0.4.6 新增，优先于文件轮询） ==========
+# 使用 ctypes 直接调用 Windows API，不依赖 pywin32，PyInstaller 打包更干净
+import ctypes
+from ctypes import wintypes
+
+PIPE_NAME = r"\\.\pipe\woldvein_trainer"
+_pipe_handle = None
+_pipe_lock = threading.Lock()
+_pipe_available = False  # 管道是否已连接成功（缓存状态，避免每次重连）
+
+# Windows API 常量
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+OPEN_EXISTING = 3
+PIPE_READMODE_MESSAGE = 0x00000002
+ERROR_PIPE_BUSY = 231
+ERROR_PIPE_LISTENING = 536
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.CreateFileW.restype = wintypes.HANDLE
+_kernel32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+    wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE
+]
+_kernel32.WriteFile.restype = wintypes.BOOL
+_kernel32.WriteFile.argtypes = [
+    wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID
+]
+_kernel32.ReadFile.restype = wintypes.BOOL
+_kernel32.ReadFile.argtypes = [
+    wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID
+]
+_kernel32.SetNamedPipeHandleState.restype = wintypes.BOOL
+_kernel32.SetNamedPipeHandleState.argtypes = [
+    wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+    ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD)
+]
+_kernel32.CloseHandle.restype = wintypes.BOOL
+_kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+
+def _connect_pipe(timeout=3.0):
+    """连接命名管道。成功返回True，失败返回False（调用方回退文件轮询）。"""
+    global _pipe_handle, _pipe_available
+    if _pipe_handle is not None and _pipe_available:
+        return True
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        handle = _kernel32.CreateFileW(
+            PIPE_NAME,
+            GENERIC_READ | GENERIC_WRITE,
+            0,  # 不共享
+            None,
+            OPEN_EXISTING,
+            0,
+            None
+        )
+        if handle != INVALID_HANDLE_VALUE and handle is not None:
+            # 设置为消息读取模式
+            mode = wintypes.DWORD(PIPE_READMODE_MESSAGE)
+            if _kernel32.SetNamedPipeHandleState(handle, ctypes.byref(mode), None, None):
+                _pipe_handle = handle
+                _pipe_available = True
+                log_success(f"[Pipe] 命名管道连接成功: {PIPE_NAME}")
+                return True
+            else:
+                _kernel32.CloseHandle(handle)
+        # 管道忙或不存在，等一下重试
+        err = ctypes.get_last_error()
+        if err == ERROR_PIPE_BUSY:
+            time.sleep(0.1)
+        else:
+            time.sleep(0.2)
+    log_warning("[Pipe] 连接超时，回退文件轮询")
+    return False
+
+
+def _close_pipe():
+    """关闭管道连接（出错时调用，下次重连）"""
+    global _pipe_handle, _pipe_available
+    if _pipe_handle is not None:
+        try:
+            _kernel32.CloseHandle(_pipe_handle)
+        except Exception:
+            pass
+    _pipe_handle = None
+    _pipe_available = False
+
+
+def _pipe_execute(code, timeout=LUA_TIMEOUT):
+    """通过命名管道执行Lua代码。返回(success, result)，失败返回None（调用方回退）。
+
+    协议与文件轮询完全一致：
+    - 发送：REQ_ID:xxxxxxxx\n + Lua代码
+    - 接收：REQ_ID:xxxxxxxx\n + 结果
+    """
+    global _pipe_handle, _pipe_available
+    if _pipe_handle is None or not _pipe_available:
+        return None
+
+    req_id = uuid.uuid4().hex[:8]
+    payload = f"REQ_ID:{req_id}\n{code}".encode("utf-8")
+
+    try:
+        # 发送命令
+        written = wintypes.DWORD(0)
+        ok = _kernel32.WriteFile(
+            _pipe_handle, payload, len(payload), ctypes.byref(written), None
+        )
+        if not ok:
+            raise OSError(f"WriteFile failed: {ctypes.get_last_error()}")
+
+        # 读取结果（消息模式，一次ReadFile读完整条消息）
+        buf = ctypes.create_string_buffer(65536)
+        start = time.time()
+        while time.time() - start < timeout:
+            read = wintypes.DWORD(0)
+            ok = _kernel32.ReadFile(
+                _pipe_handle, buf, 65536, ctypes.byref(read), None
+            )
+            if ok and read.value > 0:
+                data = buf.raw[:read.value]
+                break
+            err = ctypes.get_last_error()
+            if err == ERROR_PIPE_LISTENING:
+                time.sleep(0.02)
+                continue
+            # 其他错误 = 管道断开
+            raise OSError(f"ReadFile failed: {err}")
+        else:
+            log_warning("[Pipe] 读取超时")
+            _close_pipe()
+            return None
+
+        # 逐行解码（UTF-8/GBK混合，与文件轮询逻辑一致）
+        _decoded_lines = []
+        for _bl in data.split(b"\n"):
+            try:
+                _decoded_lines.append(_bl.decode("utf-8"))
+            except UnicodeDecodeError:
+                _decoded_lines.append(_bl.decode("gbk", errors="replace"))
+        raw = "\n".join(_decoded_lines)
+
+        lines = raw.split("\n", 1)
+        result_id_line = lines[0].strip()
+        result_str = lines[1].strip() if len(lines) > 1 else ""
+
+        # ID不匹配 = 串号，返回None让调用方重试/回退
+        if not result_id_line.startswith("REQ_ID:") or result_id_line[7:] != req_id:
+            log_warning(f"[Pipe] 请求ID不匹配，期望:{req_id} 实际:{result_id_line[:20]}")
+            return None
+
+        if result_str == "":
+            return False, -1
+
+        try:
+            result = int(result_str)
+            return (result > 0), result
+        except ValueError:
+            return True, result_str
+
+    except Exception as e:
+        log_warning(f"[Pipe] 通信异常: {e}，断开管道回退文件轮询")
+        _close_pipe()
+        return None
+
 # 通信文件路径：使用固定的 %LOCALAPPDATA%\woldvein_trainer\ 目录
 # 原因：PyInstaller onefile模式下sys._MEIPASS每次启动都不同，
 # DLL注入后驻留游戏进程，重启修改器后旧DLL仍轮询旧_MEIPASS路径，
@@ -99,6 +269,16 @@ def _execute_lua_inner(code, timeout=LUA_TIMEOUT):
     # 生成唯一请求ID（短UUID前8位，足够区分并发请求）
     req_id = uuid.uuid4().hex[:8]
     req_prefix = f"REQ_ID:{req_id}\n"
+
+    # v0.4.6：优先尝试命名管道通信（延迟更低，无文件IO）
+    # 管道失败时自动回退到文件轮询，保证兼容性
+    with _pipe_lock:
+        if _connect_pipe(timeout=2.0):
+            pipe_result = _pipe_execute(code, timeout)
+            if pipe_result is not None:
+                return pipe_result
+            # 管道返回None = 通信失败，继续回退文件轮询
+            log_warning("[Pipe] 管道执行失败，回退文件轮询")
 
     with _lock:
         # 清理旧文件

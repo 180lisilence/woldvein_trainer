@@ -1,5 +1,64 @@
 ﻿# 平野孤鸿项目变更日志
 
+## v0.4.6 (2026-09-27)
+
+### UI集成
+- 新增模块UI集成：预设系统（保存/加载/删除/列出）、操作日志撤销/重做按钮、i18n语言切换下拉框、主题切换下拉框、紧急停止按钮、热键冲突检测
+### 新增
+- 崩溃报告自动收集（src/crash_report.py）：全局异常捕获、系统信息/日志/配置/线程收集、JSON+TXT报告生成、自动保存
+- 主题增强（src/theme_manager.py）：6种预设主题（暗色/亮色/午夜蓝/森林绿/日落橙/高对比度），自定义主题创建/导入/导出，tkinter主题应用
+### 清理
+- 死代码清理：src/gui/ 目录（PyQt旧GUI，18个文件约230KB）已归档到 archived/legacy_gui/，无外部引用
+### 重构
+- 代码重构：cheat_tools.py 与 advanced_tools.py 重复函数分析，max_all_talents 已搬家到 cheat_tools，advanced_tools 改为导入，详见 docs/代码重构报告.md
+### 新增
+- CI/CD 工作流（.github/workflows/ci.yml）：自动测试、语法检查、构建EXE、编译DLL、发布Release
+- 单元测试（tests/test_core.py）：覆盖输入校验、原子文件、操作历史、热键防抖、紧急停止、事务、i18n、热键冲突 8 个模块
+- 热键冲突检测（src/hotkey_conflict.py）：检测内部/系统/游戏热键冲突，提供替代建议，支持配置导入导出
+- 日志增强（src/log_enhancer.py）：5级日志、文件滚动、过滤搜索、导出、统计、监听器
+- 启动优化（src/startup_optimizer.py）：懒加载、并行初始化、延迟初始化、启动性能分析
+- 非线性历史跳转（src/nonlinear_history.py）：支持跳转到任意历史快照点，分支历史，快照导入导出
+- 事务批量操作（src/transaction.py）：多个操作打包成事务，全部成功或全部回滚，支持事务历史管理
+- Lua 探查器（src/lua_explorer.py）：列出全局变量、递归探查表结构、获取函数信息、搜索变量、导出环境
+- 多语言 i18n 框架（src/i18n.py + locales/）：支持简体中文/英文切换，翻译键管理，语言切换监听器
+- 用户文档补全：docs/用户手册.md（快速上手、功能说明、热键、安全提示）、docs/故障排查指南.md（9大类问题排查）
+- 紧急停止管理器（src/emergency_stop.py）：一键终止全部内存写入/Hook/异步任务，支持回调和状态查询
+- 热键防抖（src/hotkey_debouncer.py）：防止连续按热键重复触发，不同功能配置不同阈值（普通200ms/高危500ms/一次性1000ms）
+- 内存地址合法性校验（src/address_validator.py）：写入前验证地址范围、内存页状态、可写权限、写入范围，防止非法地址写入导致崩溃
+- 自动更新系统（src/auto_updater.py）：GitHub Releases 检查更新、下载、SHA256校验、原子替换、失败回滚
+- AOB 特征码扫描模块（src/aob_scanner.py）：支持通配符 ?? 的内存特征码搜索，可限定最大结果数
+- 游戏内 Overlay 框架（src/injector/overlay.c + src/overlay_controller.py）：DX11 Present Hook + ImGui 渲染框架，INSERT 键切换显示，命名管道通信
+- 配置常驻内存+延时写入：配置加载后缓存到内存，保存时默认延时500ms合并写入，减少频繁IO；程序退出自动flush
+- 进程句柄缓存（src/process_handle_cache.py）：缓存 OpenProcess 句柄，避免频繁打开/关闭，进程退出自动清理
+- 操作日志与撤销机制（src/operation_history.py）：记录所有用户操作，支持撤销/重做，操作历史上限100条
+- 系统诊断模块（src/diagnostic.py）：一键收集系统环境、修改器状态、游戏状态、依赖检查，生成诊断报告并可导出
+- 监控页新增"一键系统诊断"和"导出诊断报告"按钮
+- 预设方案系统（src/preset_manager.py）：保存/加载/删除/重命名/导入/导出修改器配置预设
+- 输入数值范围校验模块（src/input_validator.py）：资源数量、知名度、幸福度、品阶等级、跳天天数、时间流速等场景的统一校验
+- 资源输入非法时弹窗提示，不再静默回退默认值
+- 品阶晋升目标钳制到 1~14 级，避免输入超大数导致游戏异常
+
+### 安全
+- 进程白名单：inject_dll 注入前验证目标进程名，只允许注入 BalladsOfHongye.exe，防止误注入其他程序
+- 高危操作二次确认：开启全部作弊、全部升级、全部完工、解锁全部成就/地块/天赋、关闭全部灾害等7项批量操作均添加确认对话框
+- 所有用户输入数值经过范围校验，防止负数、超大数、非数字导致游戏崩溃或存档损坏
+- 存档原子写入（src/atomic_file.py）：配置保存、存档备份先写临时文件再原子替换，防止断电/崩溃导致文件损坏
+- 存档备份采用 .tmp 目录 + rename 原子重命名，避免半成品备份
+- 命名管道通信（Named Pipe）替代文件轮询，Python端与DLL端通过 `\\.\pipe\woldvein_trainer` 双向通信
+- 管道通信失败时自动回退到文件轮询（lua_cmd.txt/lua_result.txt），保证向后兼容
+- Python端使用 ctypes 直接调用 Windows API，不依赖 pywin32，PyInstaller 打包更干净
+
+### 优化
+- 通信延迟从 50ms 轮询降低到即时响应（管道消息模式）
+- 消除文件IO开销，减少磁盘读写
+
+### 技术细节
+- DLL端：后台线程创建命名管道服务器，lua_pcall hook 中用 PeekNamedPipe 检查命令
+- Python端：_connect_pipe 带超时重试，_pipe_execute 保持 REQ_ID 竞态防护协议
+- 两端协议完全一致：REQ_ID:xxxxxxxx\n + Lua代码 / 结果
+
+---
+
 ## v0.4.5 (2026-09-26)
 
 ### 变更

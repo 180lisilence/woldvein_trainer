@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 平野孤鸿修改器 - tkinter 微信三栏布局版 v0.4.3
 集成完整业务逻辑
@@ -7,7 +7,7 @@
 """
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, scrolledtext, messagebox, filedialog, simpledialog
 import sys
 import os
 import threading
@@ -19,7 +19,7 @@ from datetime import datetime
 # ============================================================
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.injector import find_game_process, inject_dll, is_dll_injected, launch_game
+from src.injector import find_game_process, inject_dll, is_dll_injected, launch_game, get_dll_path
 from src.resource_editor import (
     add_resource, add_all_resources, zero_all_resources,
     max_happiness, add_fame, restore_happiness
@@ -42,6 +42,14 @@ from src import world_tools
 from src import cheat_tools
 from src.hotkey_defs import HOTKEY_DEFS, get_default_hotkeys, get_hotkey_names
 from src.constants import APP_VERSION, DEFAULT_GAME_PATH, SIM_COMMON_REL, RESOURCE_ADD_AMOUNT, FAME_ADD_AMOUNT
+
+# 新增模块导入（v0.4.6 UI集成）
+from src.i18n import get_i18n, t as i18n_t
+from src.theme_manager import get_theme_manager
+from src.emergency_stop import get_emergency_stop, trigger_emergency_stop, is_emergency_stopped
+from src.operation_history import get_operation_history
+from src.hotkey_conflict import get_hotkey_detector
+from src.preset_manager import list_presets, save_preset, load_preset, delete_preset
 
 # ============================================================
 # 配色（微信风格）
@@ -80,7 +88,7 @@ def toggle_theme():
         _current_theme = "light"
     return _current_theme
 FONT = "微软雅黑"
-DLL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist", "woldvein_trainer.dll")
+DLL_PATH = get_dll_path()  # 自动适配开发环境和PyInstaller打包环境
 VERSION = f"v{APP_VERSION}"  # 版本号唯一源：src/constants.py::APP_VERSION
 
 
@@ -207,6 +215,107 @@ class TrainerApp:
         # 延迟恢复导航位置（确保UI完全构建）
         self.root.after(100, lambda: self._switch_nav(current_nav))
         log_info(f"已切换到{'深色' if theme == 'dark' else '浅色'}主题")
+
+    def _on_language_change(self, event=None):
+        """语言切换处理"""
+        lang_name = self.lang_var.get()
+        i18n = get_i18n()
+        for code, name in i18n.get_available_languages().items():
+            if name == lang_name:
+                i18n.set_language(code)
+                self.config["language"] = code
+                save_config(self.config)
+                log_success(f"语言已切换为: {name}")
+                messagebox.showinfo("语言切换", f"界面语言已切换为：{name}\n部分文本需重启后生效。")
+                break
+
+    def _on_theme_change(self, event=None):
+        """主题切换处理"""
+        theme_name = self.theme_var.get()
+        theme_mgr = get_theme_manager()
+        if theme_name == "深色":
+            theme_mgr.set_theme("dark")
+            global _current_theme, COLORS
+            COLORS.update(DARK_COLORS)
+            _current_theme = "dark"
+        else:
+            theme_mgr.set_theme("light")
+            COLORS.update(LIGHT_COLORS)
+            _current_theme = "light"
+        self.config["theme"] = _current_theme
+        save_config(self.config)
+        log_success(f"主题已切换为: {theme_name}")
+        self._toggle_theme()
+
+    def _on_emergency_stop(self):
+        """紧急停止处理"""
+        if messagebox.askyesno("紧急停止", "确定要触发紧急停止吗？\n\n这将终止所有内存写入和Hook操作。"):
+            trigger_emergency_stop("用户手动触发")
+            log_error("紧急停止已触发！所有修改操作已终止。")
+            messagebox.showwarning("紧急停止", "紧急停止已触发！\n所有内存写入操作已终止。\n\n如需恢复，请重启修改器。")
+
+    def _on_save_preset(self):
+        """保存当前配置为预设"""
+        name = simpledialog.askstring("保存预设", "请输入预设名称：", parent=self.root)
+        if name:
+            try:
+                save_preset(name, "用户保存的配置", self.config)
+                log_success(f"预设 '{name}' 已保存")
+                messagebox.showinfo("保存成功", f"预设 '{name}' 已保存。")
+            except Exception as e:
+                log_error(f"保存预设失败: {e}")
+                messagebox.showerror("保存失败", f"保存预设失败：{e}")
+
+    def _on_load_preset(self):
+        """加载预设"""
+        presets = list_presets()
+        if not presets:
+            messagebox.showinfo("无预设", "当前没有保存的预设。")
+            return
+        preset_names = [p["name"] for p in presets]
+        choice = simpledialog.askstring("加载预设", f"可用预设：\n{', '.join(preset_names)}\n\n请输入要加载的预设名称：", parent=self.root)
+        if choice:
+            try:
+                config = load_preset(choice)
+                if config:
+                    self.config.update(config)
+                    save_config(self.config)
+                    log_success(f"预设 '{choice}' 已加载")
+                    messagebox.showinfo("加载成功", f"预设 '{choice}' 已加载，部分设置需重启生效。")
+                else:
+                    messagebox.showerror("加载失败", f"预设 '{choice}' 不存在。")
+            except Exception as e:
+                log_error(f"加载预设失败: {e}")
+                messagebox.showerror("加载失败", f"加载预设失败：{e}")
+
+    def _on_delete_preset(self):
+        """删除预设"""
+        presets = list_presets()
+        if not presets:
+            messagebox.showinfo("无预设", "当前没有保存的预设。")
+            return
+        preset_names = [p["name"] for p in presets]
+        choice = simpledialog.askstring("删除预设", f"可用预设：\n{', '.join(preset_names)}\n\n请输入要删除的预设名称：", parent=self.root)
+        if choice:
+            if messagebox.askyesno("确认删除", f"确定要删除预设 '{choice}' 吗？"):
+                try:
+                    delete_preset(choice)
+                    log_success(f"预设 '{choice}' 已删除")
+                    messagebox.showinfo("删除成功", f"预设 '{choice}' 已删除。")
+                except Exception as e:
+                    log_error(f"删除预设失败: {e}")
+                    messagebox.showerror("删除失败", f"删除预设失败：{e}")
+
+    def _on_list_presets(self):
+        """列出所有预设"""
+        presets = list_presets()
+        if not presets:
+            messagebox.showinfo("预设列表", "当前没有保存的预设。")
+            return
+        text = "已保存的预设：\n\n"
+        for p in presets:
+            text += f"• {p['name']} - {p.get('description', '无描述')} ({p.get('created', '未知时间')})\n"
+        messagebox.showinfo("预设列表", text)
 
     def _run_async(self, func, *args):
         threading.Thread(target=func, args=args, daemon=True).start()
@@ -462,6 +571,17 @@ class TrainerApp:
         log_header.pack(fill=tk.X, padx=16, pady=(8, 4))
         tk.Label(log_header, text="📋 操作日志", font=(FONT, 11, "bold"),
                 bg=COLORS["bg_card"], fg=COLORS["fg"]).pack(side=tk.LEFT)
+        # 撤销/重做按钮（v0.4.6 新增）
+        undo_frame = tk.Frame(log_header, bg=COLORS["bg_card"])
+        undo_frame.pack(side=tk.RIGHT, padx=8)
+        self.undo_btn = tk.Button(undo_frame, text="↶ 撤销", font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                                  bd=0, relief=tk.FLAT, cursor="hand2", activebackground=COLORS["bg_hover"],
+                                  command=self._on_undo)
+        self.undo_btn.pack(side=tk.LEFT, padx=4)
+        self.redo_btn = tk.Button(undo_frame, text="↷ 重做", font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                                  bd=0, relief=tk.FLAT, cursor="hand2", activebackground=COLORS["bg_hover"],
+                                  command=self._on_redo)
+        self.redo_btn.pack(side=tk.LEFT, padx=4)
         tk.Button(log_header, text="清空", font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
                  bd=0, relief=tk.FLAT, cursor="hand2", activebackground=COLORS["bg_hover"],
                  command=self._clear_log).pack(side=tk.RIGHT)
@@ -475,6 +595,43 @@ class TrainerApp:
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete("1.0", tk.END)
         self.log_text.config(state=tk.DISABLED)
+
+    def _on_undo(self):
+        """撤销上一次操作"""
+        history = get_operation_history()
+        if history.can_undo():
+            success, msg = history.undo()
+            if success:
+                log_info(f"已撤销: {msg}")
+            else:
+                log_warning(f"撤销失败: {msg}")
+        else:
+            log_warning("没有可撤销的操作")
+        self._update_undo_redo_buttons()
+
+    def _on_redo(self):
+        """重做上一次撤销的操作"""
+        history = get_operation_history()
+        if history.can_redo():
+            success, msg = history.redo()
+            if success:
+                log_info(f"已重做: {msg}")
+            else:
+                log_warning(f"重做失败: {msg}")
+        else:
+            log_warning("没有可重做的操作")
+        self._update_undo_redo_buttons()
+
+    def _update_undo_redo_buttons(self):
+        """更新撤销/重做按钮状态"""
+        try:
+            history = get_operation_history()
+            if hasattr(self, 'undo_btn'):
+                self.undo_btn.config(fg=COLORS["accent"] if history.can_undo() else COLORS["fg_muted"])
+            if hasattr(self, 'redo_btn'):
+                self.redo_btn.config(fg=COLORS["accent"] if history.can_redo() else COLORS["fg_muted"])
+        except Exception:
+            pass
 
     def _update_action_panel(self, nav, func, name):
         self._monitor_running = False
@@ -545,8 +702,50 @@ class TrainerApp:
         self.mon_game_text.pack(fill=tk.X, padx=16, pady=8)
         self.mon_game_text.config(state=tk.DISABLED)
 
+        # 一键诊断
+        diag_f = tk.Frame(g, bg=COLORS["bg_card"])
+        diag_f.pack(fill=tk.X, padx=16, pady=(0, 10))
+        self._btn(diag_f, "🔍 一键系统诊断", "primary", self._run_full_diagnosis).pack(side=tk.LEFT, padx=5)
+        self._btn(diag_f, "📋 导出诊断报告", "normal", self._export_diagnosis_report).pack(side=tk.LEFT, padx=5)
+
         self._monitor_running = True
         self._refresh_monitor()
+
+    def _run_full_diagnosis(self):
+        """运行完整系统诊断，结果输出到日志"""
+        from src.diagnostic import run_full_diagnosis
+        dll_path = get_dll_path()
+        report = run_full_diagnosis(
+            game_pid=self.game_pid,
+            dll_path=dll_path,
+            config=self.config
+        )
+        log_info("=== 系统诊断报告 ===")
+        for line in report.split("\n"):
+            log_info(line)
+        messagebox.showinfo("诊断完成", "系统诊断已完成，结果请查看日志面板。")
+
+    def _export_diagnosis_report(self):
+        """导出诊断报告到文件"""
+        from src.diagnostic import run_full_diagnosis, export_diagnosis_report
+        from tkinter import filedialog
+        dll_path = get_dll_path()
+        report = run_full_diagnosis(
+            game_pid=self.game_pid,
+            dll_path=dll_path,
+            config=self.config
+        )
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+            initialfile="woldvein_diagnosis.txt"
+        )
+        if path:
+            success, msg = export_diagnosis_report(report, path)
+            if success:
+                messagebox.showinfo("导出成功", f"诊断报告已导出到:\n{path}")
+            else:
+                messagebox.showerror("导出失败", msg)
         g2 = self._group("📋 进程信息")
         self.process_info = tk.Label(g2, text="点击「检测进程」查看...", font=(FONT, 11),
                                     bg=COLORS["bg_card"], fg=COLORS["fg_muted"], justify=tk.LEFT, anchor="w")
@@ -688,9 +887,20 @@ class TrainerApp:
 
     def _add_res(self, rid):
         if not self._check_dll(): return
-        try: amount = int(self.resource_entries[rid].get())
-        except: amount = 1000000
+        from src.input_validator import validate_resource_amount
+        amount, ok, msg = validate_resource_amount(self.resource_entries[rid].get())
+        if not ok:
+            messagebox.showwarning("输入无效", msg)
+            return
         self._run_async(add_resource, rid, amount)
+
+
+    def _confirm_dangerous(self, title, message, action_func):
+        """高危操作二次确认。确认后执行 action_func，取消则不执行。"""
+        if messagebox.askyesno(title, message):
+            action_func()
+        else:
+            log_warning(f"[高危操作] 用户取消: {title}")
 
     def _on_zero_res(self):
         if not self._check_dll(): return
@@ -781,11 +991,12 @@ class TrainerApp:
     def _add_res_internal(self, rid, amount):
         if not self._check_dll():
             return
-        try:
-            amount = int(amount) if not isinstance(amount, int) else amount
-        except Exception:
-            amount = RESOURCE_ADD_AMOUNT
-        self._run_async(add_resource, rid, amount)
+        from src.input_validator import validate_resource_amount
+        parsed, ok, msg = validate_resource_amount(amount)
+        if not ok:
+            messagebox.showwarning("输入无效", msg)
+            return
+        self._run_async(add_resource, rid, parsed)
 
     def _on_internal_status_update(self, status, success):
         """GameStatusProvider 回调（后台线程）→ 切主线程更新 UI"""
@@ -932,8 +1143,8 @@ class TrainerApp:
         bf = tk.Frame(g, bg=COLORS["bg_card"])
         bf.pack(fill=tk.X, padx=16, pady=12)
         self._btn(bf, "🔍 建筑列表", "normal", lambda: self._run_async(advanced_tools.get_building_list) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
-        self._btn(bf, "⬆️ 全部升级", "primary", lambda: self._run_async(advanced_tools.upgrade_all_buildings) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
-        self._btn(bf, "✅ 全部完工", "primary", lambda: self._run_async(advanced_tools.finish_all_buildings) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "⬆️ 全部升级", "primary", lambda: self._confirm_dangerous("全部升级", "确定要将所有建筑升级到顶级吗？", lambda: self._run_async(advanced_tools.upgrade_all_buildings)) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "✅ 全部完工", "primary", lambda: self._confirm_dangerous("全部完工", "确定要立即完成所有在建建筑吗？", lambda: self._run_async(advanced_tools.finish_all_buildings)) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🏆 升级到顶级", "primary", lambda: self._run_async(world_tools.upgrade_all_to_top) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
 
     def _build_city_tools(self):
@@ -950,7 +1161,7 @@ class TrainerApp:
         g = self._group("🎖️ Steam成就")
         bf = tk.Frame(g, bg=COLORS["bg_card"])
         bf.pack(fill=tk.X, padx=16, pady=12)
-        self._btn(bf, "🏆 解锁全部成就", "primary", lambda: self._run_async(advanced_tools.unlock_all_steam_achievements) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "🏆 解锁全部成就", "primary", lambda: self._confirm_dangerous("解锁全部成就", "确定要解锁所有Steam成就吗？\n\n此操作可能影响成就获取体验。", lambda: self._run_async(advanced_tools.unlock_all_steam_achievements)) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🏆 解锁地块挑战", "primary", lambda: self._run_async(advanced_tools.unlock_block_challenge_achievements) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🔍 探查成就", "normal", lambda: self._run_async(advanced_tools.probe_steam_achievements) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
 
@@ -958,14 +1169,14 @@ class TrainerApp:
         g = self._group("🌾 地块解锁")
         bf = tk.Frame(g, bg=COLORS["bg_card"])
         bf.pack(fill=tk.X, padx=16, pady=12)
-        self._btn(bf, "🔓 解锁全部地块", "primary", lambda: self._run_async(advanced_tools.unlock_all_plots) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "🔓 解锁全部地块", "primary", lambda: self._confirm_dangerous("解锁全部地块", "确定要解锁所有可建造地块吗？", lambda: self._run_async(advanced_tools.unlock_all_plots)) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🔍 探查地块", "normal", lambda: self._run_async(advanced_tools.probe_plots) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
 
     def _build_talent_tools(self):
         g = self._group("🧠 天赋系统")
         bf = tk.Frame(g, bg=COLORS["bg_card"])
         bf.pack(fill=tk.X, padx=16, pady=12)
-        self._btn(bf, "🔓 解锁全部天赋", "primary", lambda: self._run_async(cheat_tools.unlock_all_talents) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "🔓 解锁全部天赋", "primary", lambda: self._confirm_dangerous("解锁全部天赋", "确定要解锁所有天赋并升级到满级吗？", lambda: self._run_async(cheat_tools.unlock_all_talents)) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🏆 天赋全满级", "primary", lambda: self._run_async(cheat_tools.max_all_talents) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "⭐ +200天赋点", "normal", lambda: self._run_async(cheat_tools.add_talent_points_200) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🔍 天赋诊断", "normal", lambda: self._run_async(advanced_tools.diagnose_talent) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
@@ -975,7 +1186,7 @@ class TrainerApp:
         bf = tk.Frame(g, bg=COLORS["bg_card"])
         bf.pack(fill=tk.X, padx=16, pady=12)
         self._btn(bf, "🌊 清除地震", "normal", lambda: self._run_async(cheat_tools.clear_all_earthquakes) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
-        self._btn(bf, "✅ 关闭全部灾害", "primary", lambda: self._run_async(cheat_tools.close_all_disasters) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "✅ 关闭全部灾害", "primary", lambda: self._confirm_dangerous("关闭全部灾害", "确定要关闭所有自然灾害和人为灾害吗？", lambda: self._run_async(cheat_tools.close_all_disasters)) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🚫 禁用灾害触发", "primary", lambda: self._run_async(cheat_tools.disable_disaster_triggers) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🌪️ 清除自然灾害", "normal", lambda: self._run_async(world_tools.clear_natural_disaster) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🔥 清除人为灾害", "normal", lambda: self._run_async(world_tools.clear_manmade_disaster) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
@@ -1017,7 +1228,7 @@ class TrainerApp:
                 bg=COLORS["bg_card"], fg=COLORS["fg_muted"], anchor="w").pack(fill=tk.X, anchor=tk.W, padx=16, pady=8)
         bf = tk.Frame(g, bg=COLORS["bg_card"])
         bf.pack(fill=tk.X, padx=16, pady=12)
-        self._btn(bf, "🔥 开启全部作弊", "danger", lambda: self._run_async(cheat_tools.enable_all_cheats) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "🔥 开启全部作弊", "danger", lambda: self._confirm_dangerous("开启全部作弊", "确定要一次性开启所有作弊功能吗？\n\n包括：天赋全解锁、成就全解锁、灾害全关闭、核心数值拉满等9项功能。", lambda: self._run_async(cheat_tools.enable_all_cheats)) if self._check_dll() else None).pack(side=tk.LEFT, padx=5)
 
         g2 = self._group("📋 功能清单")
         features = ["天赋全解锁+满级", "成就全解锁", "灾害全关闭", "季节固定", "天气固定",
@@ -1122,25 +1333,21 @@ class TrainerApp:
             log_error("存档目录不存在")
             return
         backup_dir = os.path.join(os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__)), "backups")
-        os.makedirs(backup_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = os.path.join(backup_dir, f"save_backup_{timestamp}")
-        try:
-            shutil.copytree(save_dir, dest)
+        from src.atomic_file import atomic_backup_dir
+        success, dest, err = atomic_backup_dir(save_dir, backup_dir, "save_backup")
+        if success:
             log_success(f"存档已备份到: {dest}")
-        except Exception as e:
-            log_error(f"备份失败: {e}")
+        else:
+            log_error(f"备份失败: {err}")
 
     def _backup_file(self, filepath):
         backup_dir = os.path.join(os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__)), "backups")
-        os.makedirs(backup_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = os.path.join(backup_dir, f"{os.path.basename(filepath)}_{timestamp}")
-        try:
-            shutil.copy2(filepath, dest)
+        from src.atomic_file import atomic_backup_file
+        success, dest, err = atomic_backup_file(filepath, backup_dir)
+        if success:
             log_success(f"已备份: {os.path.basename(filepath)}")
-        except Exception as e:
-            log_error(f"备份失败: {e}")
+        else:
+            log_error(f"备份失败: {err}")
 
     def _clean_backups(self):
         backup_dir = os.path.join(os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__)), "backups")
@@ -1203,8 +1410,50 @@ class TrainerApp:
         self.mon_game_text.pack(fill=tk.X, padx=16, pady=8)
         self.mon_game_text.config(state=tk.DISABLED)
 
+        # 一键诊断
+        diag_f = tk.Frame(g, bg=COLORS["bg_card"])
+        diag_f.pack(fill=tk.X, padx=16, pady=(0, 10))
+        self._btn(diag_f, "🔍 一键系统诊断", "primary", self._run_full_diagnosis).pack(side=tk.LEFT, padx=5)
+        self._btn(diag_f, "📋 导出诊断报告", "normal", self._export_diagnosis_report).pack(side=tk.LEFT, padx=5)
+
         self._monitor_running = True
         self._refresh_monitor()
+
+    def _run_full_diagnosis(self):
+        """运行完整系统诊断，结果输出到日志"""
+        from src.diagnostic import run_full_diagnosis
+        dll_path = get_dll_path()
+        report = run_full_diagnosis(
+            game_pid=self.game_pid,
+            dll_path=dll_path,
+            config=self.config
+        )
+        log_info("=== 系统诊断报告 ===")
+        for line in report.split("\n"):
+            log_info(line)
+        messagebox.showinfo("诊断完成", "系统诊断已完成，结果请查看日志面板。")
+
+    def _export_diagnosis_report(self):
+        """导出诊断报告到文件"""
+        from src.diagnostic import run_full_diagnosis, export_diagnosis_report
+        from tkinter import filedialog
+        dll_path = get_dll_path()
+        report = run_full_diagnosis(
+            game_pid=self.game_pid,
+            dll_path=dll_path,
+            config=self.config
+        )
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")],
+            initialfile="woldvein_diagnosis.txt"
+        )
+        if path:
+            success, msg = export_diagnosis_report(report, path)
+            if success:
+                messagebox.showinfo("导出成功", f"诊断报告已导出到:\n{path}")
+            else:
+                messagebox.showerror("导出失败", msg)
 
     def _refresh_monitor(self):
         if not hasattr(self, '_monitor_running') or not self._monitor_running:
@@ -1357,6 +1606,42 @@ return err
         self._btn(bf, "📁 打开备份文件夹", "normal", self._open_backup_dir).pack(side=tk.LEFT, padx=4)
         self._btn(bf, "📁 打开配置文件夹", "normal", self._open_config_dir).pack(side=tk.LEFT, padx=4)
 
+        # ===== 语言和主题设置（v0.4.6 新增）=====
+        g_lang = self._group("🌐 语言和主题")
+        bf_lang = tk.Frame(g_lang, bg=COLORS["bg_card"])
+        bf_lang.pack(fill=tk.X, padx=16, pady=12)
+
+        # 语言切换
+        tk.Label(bf_lang, text="界面语言:", font=(FONT, 11), bg=COLORS["bg_card"], fg=COLORS["fg"]).pack(side=tk.LEFT, padx=(0, 8))
+        self.lang_var = tk.StringVar(value=get_i18n().get_language_name())
+        lang_options = [name for name in get_i18n().get_available_languages().values()]
+        self.lang_menu = ttk.Combobox(bf_lang, textvariable=self.lang_var, values=lang_options,
+                                       state="readonly", width=12, font=(FONT, 10))
+        self.lang_menu.pack(side=tk.LEFT, padx=(0, 20))
+        self.lang_menu.bind("<<ComboboxSelected>>", self._on_language_change)
+
+        # 主题切换
+        tk.Label(bf_lang, text="界面主题:", font=(FONT, 11), bg=COLORS["bg_card"], fg=COLORS["fg"]).pack(side=tk.LEFT, padx=(0, 8))
+        self.theme_var = tk.StringVar(value="浅色")
+        theme_options = ["浅色", "深色"]
+        self.theme_menu = ttk.Combobox(bf_lang, textvariable=self.theme_var, values=theme_options,
+                                       state="readonly", width=10, font=(FONT, 10))
+        self.theme_menu.pack(side=tk.LEFT, padx=(0, 20))
+        self.theme_menu.bind("<<ComboboxSelected>>", self._on_theme_change)
+
+        # 紧急停止按钮
+        self._btn(bf_lang, "🛑 紧急停止", "danger", self._on_emergency_stop).pack(side=tk.RIGHT, padx=4)
+
+        # ===== 预设方案管理（v0.4.6 新增）=====
+        g_preset = self._group("📦 预设方案")
+        bf_preset = tk.Frame(g_preset, bg=COLORS["bg_card"])
+        bf_preset.pack(fill=tk.X, padx=16, pady=12)
+
+        self._btn(bf_preset, "💾 保存当前配置", "primary", self._on_save_preset).pack(side=tk.LEFT, padx=5)
+        self._btn(bf_preset, "📂 加载预设", "normal", self._on_load_preset).pack(side=tk.LEFT, padx=5)
+        self._btn(bf_preset, "🗑️ 删除预设", "normal", self._on_delete_preset).pack(side=tk.LEFT, padx=5)
+        self._btn(bf_preset, "📋 列出预设", "normal", self._on_list_presets).pack(side=tk.LEFT, padx=5)
+
         tk.Frame(g, bg=COLORS["bg_card"], height=8).pack()
         if func == 0:  # 热键
             self._build_hotkey_settings()
@@ -1373,6 +1658,7 @@ return err
         bf.pack(fill=tk.X, padx=16, pady=12)
         self._btn(bf, "↩ 恢复默认热键", "primary", self._restore_hotkeys).pack(side=tk.LEFT, padx=5)
         self._btn(bf, "🔄 重新注册", "normal", self._reregister_hotkeys).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "⚠️ 检测冲突", "normal", self._check_hotkey_conflicts).pack(side=tk.LEFT, padx=5)
 
         # 热键列表
         list_frame = tk.Frame(g, bg=COLORS["bg_card"])
@@ -1410,6 +1696,47 @@ return err
     def _reregister_hotkeys(self):
         log_info("重新注册热键...")
         log_success("热键重新注册完成")
+
+    def _check_hotkey_conflicts(self):
+        """检测热键冲突"""
+        detector = get_hotkey_detector()
+        current_hotkeys = self.config.get("hotkeys", get_default_hotkeys())
+
+        # 注册所有热键到检测器
+        for key, info in HOTKEY_DEFS.items():
+            hotkey = current_hotkeys.get(key, info["default"])
+            detector.register(key, hotkey)
+
+        # 检查冲突
+        all_conflicts = detector.check_all()
+
+        if all_conflicts:
+            conflict_text = "发现以下热键冲突：\n\n"
+            for c in all_conflicts:
+                conflict_text += f"• {c['hotkey']}: {', '.join(c['functions'])}\n"
+            messagebox.showwarning("热键冲突", conflict_text)
+            log_warning(f"检测到 {len(all_conflicts)} 个热键冲突")
+        else:
+            # 也检查系统热键冲突
+            system_conflicts = []
+            for key, info in HOTKEY_DEFS.items():
+                hotkey = current_hotkeys.get(key, info["default"])
+                has_conflict, conflicts = detector.check(hotkey)
+                if has_conflict:
+                    for c in conflicts:
+                        if c["type"] == "system":
+                            system_conflicts.append(f"{hotkey} ({info['name']}): {c['description']}")
+
+            if system_conflicts:
+                conflict_text = "以下热键与系统热键冲突：\n\n"
+                conflict_text += "\n".join(f"• {c}" for c in system_conflicts[:10])
+                if len(system_conflicts) > 10:
+                    conflict_text += f"\n... 还有 {len(system_conflicts)-10} 个"
+                messagebox.showwarning("系统热键冲突", conflict_text)
+                log_warning(f"检测到 {len(system_conflicts)} 个系统热键冲突")
+            else:
+                messagebox.showinfo("热键检测", "未检测到热键冲突，所有热键配置正常。")
+                log_success("热键冲突检测完成，未发现冲突")
 
     def _build_log_settings(self):
         g = self._group("📝 日志管理")
