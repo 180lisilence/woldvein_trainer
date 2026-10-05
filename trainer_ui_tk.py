@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 平野孤鸿修改器 - tkinter 微信三栏布局版 v0.4.3
 集成完整业务逻辑
@@ -88,7 +88,11 @@ def toggle_theme():
         _current_theme = "light"
     return _current_theme
 FONT = "微软雅黑"
-DLL_PATH = get_dll_path()  # 自动适配开发环境和PyInstaller打包环境
+# 自动适配开发环境和 PyInstaller 打包环境。
+# 打包后注入器可能不在机器上：这里必须能容忍取不到（返回空串），
+# 否则模块级求值会打断整个 import，exe 一启动就崩。
+try:/n    DLL_PATH = get_dll_path() or ""
+except Exception:/n    DLL_PATH = ""
 VERSION = f"v{APP_VERSION}"  # 版本号唯一源：src/constants.py::APP_VERSION
 
 
