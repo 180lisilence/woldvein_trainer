@@ -31,6 +31,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 
@@ -65,6 +66,14 @@ static char g_req_id[64] = {0};         /* 当前请求ID（用于竞态防护�
 static volatile LONG g_hooked = 0;
 static CRITICAL_SECTION g_log_lock;
 static char g_log_file[MAX_PATH] = {0};
+
+/* ---------- 命名管道通信（v0.4.6 新增，替代文件轮询） ---------- */
+#define PIPE_NAME "\\\\.\\pipe\\woldvein_trainer"
+static HANDLE g_pipe = INVALID_HANDLE_VALUE;
+static HANDLE g_pipe_thread = NULL;
+static volatile LONG g_pipe_connected = 0;
+static volatile LONG g_pipe_stop = 0;
+static CRITICAL_SECTION g_pipe_lock;
 
 /* Inline hook 相关 */
 static unsigned char g_orig_bytes[32] = {0};
@@ -434,6 +443,111 @@ static void check_command_file() {
     free(code);
 }
 
+/* ---------- 命名管道通信（v0.4.6） ---------- */
+
+/* 管道服务器后台线程：创建管道→等待连接→监控连接→断开后重连 */
+static DWORD WINAPI pipe_server_thread(LPVOID param) {
+    while (!InterlockedCompareExchange(&g_pipe_stop, 0, 0)) {
+        g_pipe = CreateNamedPipeA(
+            PIPE_NAME,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            1,
+            65536, 65536,
+            0, NULL
+        );
+        if (g_pipe == INVALID_HANDLE_VALUE) {
+            Sleep(1000);
+            continue;
+        }
+        /* 阻塞等待客户端连接 */
+        if (ConnectNamedPipe(g_pipe, NULL) || GetLastError() == ERROR_PIPE_CONNECTED) {
+            InterlockedExchange(&g_pipe_connected, 1);
+            log_msg("[Pipe] Python客户端已连接");
+        }
+        /* 监控连接状态，断开则重建 */
+        while (g_pipe != INVALID_HANDLE_VALUE &&
+               InterlockedCompareExchange(&g_pipe_connected, 0, 0) &&
+               !InterlockedCompareExchange(&g_pipe_stop, 0, 0)) {
+            Sleep(200);
+            DWORD avail = 0;
+            if (!PeekNamedPipe(g_pipe, NULL, 0, NULL, &avail, NULL)) {
+                break;  /* 客户端断开 */
+            }
+        }
+        InterlockedExchange(&g_pipe_connected, 0);
+        if (g_pipe != INVALID_HANDLE_VALUE) {
+            DisconnectNamedPipe(g_pipe);
+            CloseHandle(g_pipe);
+            g_pipe = INVALID_HANDLE_VALUE;
+        }
+        log_msg("[Pipe] 客户端断开，等待重连");
+    }
+    return 0;
+}
+
+/* 在 lua_pcall hook 中调用：检查管道是否有命令，有则执行并写回 */
+static void check_named_pipe(void) {
+    if (!InterlockedCompareExchange(&g_pipe_connected, 0, 0) ||
+        g_pipe == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    EnterCriticalSection(&g_pipe_lock);
+    DWORD avail = 0;
+    if (!PeekNamedPipe(g_pipe, NULL, 0, NULL, &avail, NULL) || avail == 0) {
+        LeaveCriticalSection(&g_pipe_lock);
+        return;
+    }
+    char *buf = (char*)malloc(100001);
+    if (!buf) { LeaveCriticalSection(&g_pipe_lock); return; }
+    DWORD nread = 0;
+    if (!ReadFile(g_pipe, buf, 100000, &nread, NULL) || nread == 0) {
+        free(buf);
+        LeaveCriticalSection(&g_pipe_lock);
+        return;
+    }
+    buf[nread] = 0;
+
+    /* 解析请求ID（与文件格式一致：REQ_ID:xxxxxxxx\n + Lua代码） */
+    g_req_id[0] = 0;
+    char *code_start = buf;
+    if (strncmp(buf, "REQ_ID:", 7) == 0) {
+        char *nl = strchr(buf, '\n');
+        if (nl) {
+            int idlen = (int)(nl - buf - 7);
+            if (idlen > 0 && idlen < (int)sizeof(g_req_id)) {
+                memcpy(g_req_id, buf + 7, idlen);
+                g_req_id[idlen] = 0;
+            }
+            code_start = nl + 1;
+        }
+    }
+
+    log_msg("[Pipe] 执行Lua命令 (%d bytes)", (int)(nread - (code_start - buf)));
+    int ret = execute_lua(code_start);
+
+    /* 写回结果：REQ_ID:xxxxxxxx\n + 结果 */
+    char rbuf[65600];
+    int rlen = 0;
+    if (g_req_id[0]) {
+        rlen = snprintf(rbuf, sizeof(rbuf), "REQ_ID:%s\n", g_req_id);
+    }
+    if (g_result_is_str && g_result_str[0]) {
+        int slen = (int)strlen(g_result_str);
+        if (rlen + slen < (int)sizeof(rbuf)) {
+            memcpy(rbuf + rlen, g_result_str, slen);
+            rlen += slen;
+        }
+    } else {
+        rlen += snprintf(rbuf + rlen, sizeof(rbuf) - rlen, "%d", ret);
+    }
+    DWORD nwritten = 0;
+    WriteFile(g_pipe, rbuf, rlen, &nwritten, NULL);
+
+    free(buf);
+    LeaveCriticalSection(&g_pipe_lock);
+}
+
 /* ---------- Hook 回调 ---------- */
 static int __cdecl my_lua_pcall(lua_State *L, int nargs, int nresults, int errfunc) {
     if (!g_L) {
@@ -448,6 +562,7 @@ static int __cdecl my_lua_pcall(lua_State *L, int nargs, int nresults, int errfu
     if (now - last_check > 50) { /* 50ms 间隔 */
         last_check = now;
         check_command_file();
+        check_named_pipe();  /* v0.4.6：命名管道通信（优先） */
     }
 
     return real_lua_pcall(L, nargs, nresults, errfunc);
@@ -608,6 +723,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         case DLL_PROCESS_ATTACH: {
             DisableThreadLibraryCalls(hinstDLL);
             InitializeCriticalSection(&g_log_lock);
+            InitializeCriticalSection(&g_pipe_lock);
 
             /* 设置日志路径 */
             GetModuleFileNameA(hinstDLL, g_log_file, MAX_PATH);
@@ -618,8 +734,12 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
             }
 
             log_msg("========================================");
-            log_msg("woldvein_trainer.dll v0.3 注入");
+            log_msg("woldvein_trainer.dll v0.4.6 注入（命名管道通信）");
             log_msg("========================================");
+
+            /* 启动命名管道服务器线程（后台等待Python连接） */
+            g_pipe_thread = CreateThread(NULL, 0, pipe_server_thread, NULL, 0, NULL);
+            log_msg("[Pipe] 命名管道服务器线程已启动: %s", PIPE_NAME);
 
             /* 查找并 hook lua_pcall */
             void *target = find_lua_pcall();
@@ -633,6 +753,19 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
             break;
         }
         case DLL_PROCESS_DETACH: {
+            /* 停止命名管道线程 */
+            InterlockedExchange(&g_pipe_stop, 1);
+            if (g_pipe != INVALID_HANDLE_VALUE) {
+                DisconnectNamedPipe(g_pipe);
+                CloseHandle(g_pipe);
+                g_pipe = INVALID_HANDLE_VALUE;
+            }
+            if (g_pipe_thread) {
+                WaitForSingleObject(g_pipe_thread, 2000);
+                CloseHandle(g_pipe_thread);
+                g_pipe_thread = NULL;
+            }
+            DeleteCriticalSection(&g_pipe_lock);
             restore_inline_hook();
             log_msg("woldvein_trainer.dll 卸载");
             DeleteCriticalSection(&g_log_lock);

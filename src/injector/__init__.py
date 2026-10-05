@@ -84,6 +84,32 @@ STILL_ACTIVE = 259
 
 GAME_PROCESS_NAME = "BalladsOfHongye.exe"
 
+# 进程白名单：只允许注入到这些进程（防止误注入其他程序）
+PROCESS_WHITELIST = [
+    "balladsofhongye.exe",  # 平野孤鸿 主程序
+]
+
+
+def validate_process_pid(pid):
+    """验证PID对应的进程是否在白名单中。
+
+    返回 (is_valid, process_name, error_msg)
+    """
+    import psutil
+    try:
+        proc = psutil.Process(pid)
+        name = proc.name()
+        if name.lower() in PROCESS_WHITELIST:
+            return True, name, ""
+        return False, name, f"进程 {name} (PID={pid}) 不在白名单中，拒绝注入"
+    except psutil.NoSuchProcess:
+        return False, None, f"PID={pid} 对应的进程不存在"
+    except psutil.AccessDenied:
+        return False, None, f"无法访问 PID={pid} 的进程信息（权限不足）"
+    except Exception as e:
+        return False, None, f"验证进程 PID={pid} 时异常: {e}"
+
+
 
 def find_game_process():
     """查找游戏进程，返回 (pid, process) 或 (None, None)"""
@@ -121,7 +147,8 @@ def get_process_modules(pid):
         ]
         psapi.GetModuleFileNameExW.restype = wintypes.DWORD
 
-        h = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+        from ..process_handle_cache import get_process_handle
+        h, err = get_process_handle(pid, PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)
         if not h:
             return modules
         try:
@@ -133,11 +160,57 @@ def get_process_modules(pid):
                 for i in range(count):
                     if psapi.GetModuleFileNameExW(h, arr[i], buf, MAX_PATH):
                         modules.append(os.path.basename(buf.value))
-        finally:
-            kernel32.CloseHandle(h)
+        except Exception as e:
+            log_error(f"获取进程模块失败: {e}")
     except Exception as e:
         log_error(f"获取进程模块失败: {e}")
     return modules
+
+
+def get_dll_path():
+    """
+    获取 DLL 文件路径，自动适配开发环境和 PyInstaller 打包环境。
+
+    优先级：
+    1. PyInstaller onefile 模式：sys._MEIPASS/dist/woldvein_trainer.dll
+    2. 开发环境：项目根目录/dist/woldvein_trainer.dll
+    3. EXE 同目录：dist/woldvein_trainer.dll（兼容 onedir 模式）
+
+    返回：
+        DLL 文件的绝对路径
+    """
+    import sys
+    dll_name = "woldvein_trainer.dll"
+
+    # 1. PyInstaller onefile 模式：从 _MEIPASS 临时目录查找
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        meipass_path = os.path.join(sys._MEIPASS, "dist", dll_name)
+        if os.path.exists(meipass_path):
+            return meipass_path
+
+    # 2. 开发环境：项目根目录/dist/
+    # __file__ = src/injector/__init__.py，需要往上3层到项目根
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    dev_path = os.path.join(project_root, "dist", dll_name)
+    if os.path.exists(dev_path):
+        return dev_path
+
+    # 3. EXE 同目录（onedir 模式或手动放置）
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+    else:
+        exe_dir = project_root
+    exe_path = os.path.join(exe_dir, "dist", dll_name)
+    if os.path.exists(exe_path):
+        return exe_path
+
+    # 4. 直接同目录
+    same_dir = os.path.join(exe_dir, dll_name)
+    if os.path.exists(same_dir):
+        return same_dir
+
+    # 都找不到，返回默认路径（调用方会检查存在性）
+    return dev_path
 
 
 def is_dll_injected(pid, dll_name):
@@ -150,7 +223,16 @@ def inject_dll(pid, dll_path):
     """
     注入DLL到目标进程
     返回 (success, message)
+
+    安全：注入前验证目标进程是否在白名单中，防止误注入其他程序。
     """
+    # 进程白名单验证（防止误注入）
+    is_valid, proc_name, err_msg = validate_process_pid(pid)
+    if not is_valid:
+        log_error(f"[安全] 注入被拒绝: {err_msg}")
+        return False, err_msg
+    log(f"[安全] 进程白名单验证通过: {proc_name} (PID={pid})")
+
     dll_path = os.path.abspath(dll_path)
     if not os.path.exists(dll_path):
         return False, f"DLL文件不存在: {dll_path}"
