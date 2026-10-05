@@ -44,9 +44,23 @@ def _candidate_paths():
     if env:
         paths.append(env)
 
+    # 并列布局（本机实际目录结构）：
+    #   trainers/woldvein_trainer/woldvein_trainer0.5.0
+    #     ←→  trainers/woldvein_trainer/woldvein_injector0.4.7
+    paths.append(os.path.join(os.path.dirname(trainer_root), INJECTOR_DIR_NAME))
+
     # 归集布局：trainers/woldvein_trainer/0.5.0  ←→  trainers/injector/0.4.7
     paths.append(os.path.join(
         os.path.dirname(os.path.dirname(trainer_root)), "injector", INJECTOR_DIR_NAME))
+
+    # 兜底：同级目录下任意 woldvein_injector*（注入器版本号升级后仍可命中）
+    try:
+        parent = os.path.dirname(trainer_root)
+        for name in sorted(os.listdir(parent), reverse=True):
+            if name.startswith("woldvein_injector"):
+                paths.append(os.path.join(parent, name))
+    except Exception:
+        pass
 
     # 内嵌布局（打包时 datas 打进 _MEIPASS 的 vendor/）
     paths.append(os.path.join(trainer_root, "vendor", INJECTOR_DIR_NAME))
