@@ -1,0 +1,102 @@
+# -*- mode: python ; coding: utf-8 -*-
+import os
+import sys
+
+block_cipher = None
+
+# SPECPATH 由 PyInstaller 注入：本 spec 文件所在目录（即项目根），勿硬编码绝对路径
+PROJECT_DIR = os.path.abspath(SPECPATH) if 'SPECPATH' in globals() else os.path.dirname(os.path.abspath(__file__))
+
+a = Analysis(
+    ['main.py'],
+    pathex=[PROJECT_DIR],
+    binaries=[],
+    datas=[
+        ('dist/woldvein_trainer.dll', 'dist'),
+        ('assets', 'assets'),
+        ('locales', 'locales'),
+        ('presets', 'presets'),
+        ('config.json', '.'),
+    ],
+    hiddenimports=[
+        'tkinter',
+        'tkinter.ttk',
+        'tkinter.scrolledtext',
+        'tkinter.messagebox',
+        'tkinter.filedialog',
+        'src.constants',
+        'src.config',
+        'src.logger',
+        'src.lua_engine',
+        'src.lua_lib',
+        'src.resource_editor',
+        'src.resource_defs',
+        'src.creative_mode',
+        'src.advanced_tools',
+        'src.cheat_tools',
+        'src.world_tools',
+        'src.game_status',
+        'src.game_monitor',
+        'src.hotkey_defs',
+        'src.hotkey_manager',
+        'src.injector',
+        # v0.4.6 新增模块
+        'src.input_validator',
+        'src.atomic_file',
+        'src.preset_manager',
+        'src.diagnostic',
+        'src.operation_history',
+        'src.process_handle_cache',
+        'src.overlay_controller',
+        'src.aob_scanner',
+        'src.auto_updater',
+        'src.address_validator',
+        'src.hotkey_debouncer',
+        'src.emergency_stop',
+        'src.i18n',
+        'src.lua_explorer',
+        'src.transaction',
+        'src.nonlinear_history',
+        'src.startup_optimizer',
+        'src.log_enhancer',
+        'src.hotkey_conflict',
+        'src.theme_manager',
+        'src.crash_report',
+        'src.offline_crack',
+        'src.perf_optimizer',
+        'tkinter.simpledialog',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='woldvein_trainer',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    # UPX 压缩常被杀软误报、且每次启动还要解压，这里关闭
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>修改器UI原型 v0.4.2</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; font-family:"Microsoft YaHei", sans-serif; }
+body { background:#f0f0f0; height:100vh; display:flex; overflow:hidden; font-size:13px; }
+.sidebar { width:80px; background:#2e2e2e; display:flex; flex-direction:column; align-items:center; padding:12px 0; }
+.nav-btn { width:60px; padding:10px 0; margin:2px 0; border-radius:6px; color:#999; font-size:12px; text-align:center; cursor:pointer; }
+.nav-btn:hover { background:#3d3d3d; color:#fff; }
+.nav-btn.active { background:#07C160; color:#fff; }
+.nav-bottom { margin-top:auto; }
+.list-panel { width:230px; background:#fff; border-right:1px solid #e6e6e6; display:flex; flex-direction:column; }
+.search-box { padding:8px; }
+.search-box input { width:100%; padding:6px 10px; border:1px solid #e0e0e0; border-radius:4px; font-size:12px; outline:none; }
+.list-scroll { flex:1; overflow-y:auto; }
+.list-item { padding:10px 12px; border-bottom:1px solid #f0f0f0; cursor:pointer; }
+.list-item:hover { background:#f5f5f5; }
+.list-item.active { background:#e8f8ef; border-left:3px solid #07C160; }
+.list-item .name { font-size:13px; color:#333; font-weight:bold; }
+.list-item .desc { font-size:11px; color:#999; margin-top:2px; }
+.main-panel { flex:1; background:#f0f0f0; display:flex; flex-direction:column; overflow:hidden; }
+.main-header { height:46px; background:#fff; border-bottom:1px solid #e6e6e6; display:flex; align-items:center; padding:0 20px; font-size:14px; font-weight:bold; color:#333; }
+.main-content { flex:1; overflow-y:auto; padding:16px; }
+.card { background:#fff; border-radius:8px; padding:16px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,0.05); }
+.card-title { font-size:13px; font-weight:bold; color:#333; margin-bottom:12px; }
+.card-row { display:flex; gap:10px; flex-wrap:wrap; }
+.stat-card { flex:1; min-width:90px; background:#f9f9f9; border:1px solid #eee; border-radius:6px; padding:12px 8px; text-align:center; }
+.stat-card .label { font-size:11px; color:#999; }
+.stat-card .value { font-size:18px; font-weight:bold; color:#333; margin-top:4px; }
+.btn { padding:7px 14px; border:none; border-radius:4px; font-size:12px; cursor:pointer; margin:3px; }
+.btn-primary { background:#07C160; color:#fff; }
+.btn-normal { background:#e8e8e8; color:#333; }
+.btn-danger { background:#ff4d4f; color:#fff; }
+.log-box { background:#1e1e1e; color:#d4d4d4; padding:12px; border-radius:6px; font-family:Consolas, monospace; font-size:11px; height:120px; overflow-y:auto; line-height:1.6; }
+.chart-placeholder { background:#f9f9f9; border:1px dashed #ccc; border-radius:6px; height:100px; display:flex; align-items:center; justify-content:center; color:#999; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="sidebar">
+  <div class="nav-btn active" data-nav="0">🏠<br>主页</div>
+  <div class="nav-btn" data-nav="1">✨<br>创造</div>
+  <div class="nav-btn" data-nav="2">🔧<br>工具</div>
+  <div class="nav-btn" data-nav="3">💾<br>存档</div>
+  <div class="nav-btn" data-nav="4">📊<br>监控</div>
+  <div class="nav-btn nav-bottom" data-nav="5">⚙️<br>设置</div>
+</div>
+<div class="list-panel">
+  <div class="search-box"><input type="text" placeholder="🔍 搜索功能..."></div>
+  <div class="list-scroll" id="list-items"></div>
+</div>
+<div class="main-panel">
+  <div class="main-header" id="main-title">主页 / 游戏概览</div>
+  <div class="main-content" id="main-content"></div>
+</div>
+<script>
+const NAV = [
+  { name:"主页", items:[
+    { name:"游戏概览", desc:"查看游戏运行状态" },
+    { name:"快速操作", desc:"启动游戏/注入DLL" },
+  ]},
+  { name:"创造", items:[
+    { name:"鸿业满级", desc:"鸿业等级满级" },
+    { name:"全建筑解锁", desc:"解锁所有建筑" },
+    { name:"无限资源", desc:"建造不消耗" },
+    { name:"无限制升级", desc:"升级无限制" },
+  ]},
+  { name:"工具", items:[
+    { name:"时间控制", desc:"加速/季节/跳天" },
+    { name:"天气控制", desc:"固定天气" },
+    { name:"NPC管理", desc:"谋士/居民" },
+    { name:"建造控制", desc:"建造/升级" },
+    { name:"城市品阶", desc:"品阶提升" },
+    { name:"Steam成就", desc:"解锁成就" },
+    { name:"地块解锁", desc:"解锁地块" },
+    { name:"天赋系统", desc:"天赋满级" },
+    { name:"灾害控制", desc:"清除灾害" },
+    { name:"节日控制", desc:"节日管理" },
+    { name:"核心数值", desc:"直接设置" },
+    { name:"一键全开", desc:"全部作弊" },
+  ]},
+  { name:"存档", items:[
+    { name:"存档列表", desc:"查看存档" },
+    { name:"存档备份", desc:"备份存档" },
+    { name:"存档恢复", desc:"恢复备份" },
+    { name:"清理备份", desc:"清理旧备份" },
+  ]},
+  { name:"监控", items:[
+    { name:"进程监控", desc:"内存/CPU/状态" },
+  ]},
+  { name:"设置", items:[
+    { name:"热键设置", desc:"全局热键" },
+    { name:"日志管理", desc:"日志路径" },
+    { name:"MOD管理", desc:"散文件MOD" },
+    { name:"关于", desc:"版本信息" },
+  ]},
+];
+let curNav = 0, curItem = 0;
+function renderList() {
+  const el = document.getElementById("list-items");
+  el.innerHTML = "";
+  NAV[curNav].items.forEach((it, i) => {
+    const d = document.createElement("div");
+    d.className = "list-item" + (i === curItem ? " active" : "");
+    d.innerHTML = `<div class="name">${it.name}</div><div class="desc">${it.desc}</div>`;
+    d.onclick = () => { curItem = i; renderList(); renderContent(); };
+    el.appendChild(d);
+  });
+}
+function renderContent() {
+  const nav = NAV[curNav];
+  const item = nav.items[curItem];
+  document.getElementById("main-title").textContent = nav.name + " / " + item.name;
+  const c = document.getElementById("main-content");
+  let html = "";
+  if (curNav === 0 && curItem === 0) {
+    html = `<div class="card"><div class="card-title">📊 运行状态</div>
+      <div class="card-row">
+        <div class="stat-card"><div class="label">游戏</div><div class="value" style="color:#07C160">运行中</div></div>
+        <div class="stat-card"><div class="label">DLL</div><div class="value" style="color:#07C160">已注入</div></div>
+        <div class="stat-card"><div class="label">Lua</div><div class="value" style="color:#07C160">已连接</div></div>
+        <div class="stat-card"><div class="label">PID</div><div class="value">34920</div></div>
+        <div class="stat-card"><div class="label">内存</div><div class="value">856MB</div></div>
+      </div></div>
+      <div class="card"><div class="card-title">🎮 游戏状态</div>
+      <div class="log-box">金钱: 5,000,000 | 人口: 40 | 食物: 10,000\n木料: 40,000 | 盐: 0 | 酒: 0</div></div>`;
+  } else if (curNav === 0 && curItem === 1) {
+    html = `<div class="card"><div class="card-title">🚀 快速操作</div>
+      <button class="btn btn-primary">启动游戏</button>
+      <button class="btn btn-primary">注入DLL</button>
+      <button class="btn btn-normal">检测进程</button>
+      <button class="btn btn-danger">断开DLL</button></div>`;
+  } else if (curNav === 4) {
+    html = `<div class="card"><div class="card-title">📊 进程监控</div>
+      <div class="card-row">
+        <div class="stat-card"><div class="label">PID</div><div class="value">34920</div></div>
+        <div class="stat-card"><div class="label">内存</div><div class="value">856MB</div></div>
+        <div class="stat-card"><div class="label">CPU</div><div class="value">12%</div></div>
+        <div class="stat-card"><div class="label">DLL</div><div class="value" style="color:#07C160">已注入</div></div>
+      </div></div>
+      <div class="card"><div class="card-title">💾 内存历史（近30秒）</div>
+      <div class="chart-placeholder">📈 内存曲线图</div></div>
+      <div class="card"><div class="card-title">🎮 游戏状态</div>
+      <div class="log-box">金钱: 5,000,000\n人口: 40 | 品阶: 14/14\n时间: 1年12月21日 (冬) 1.0x</div></div>`;
+  } else {
+    html = `<div class="card"><div class="card-title">${item.name}</div>
+      <p style="color:#999;font-size:12px;margin-bottom:12px">${item.desc}</p>
+      <button class="btn btn-primary">执行</button>
+      <button class="btn btn-normal">刷新</button>
+      <button class="btn btn-danger">重置</button></div>
+      <div class="card"><div class="card-title">📝 执行日志</div>
+      <div class="log-box">暂无执行日志</div></div>`;
+  }
+  c.innerHTML = html;
+}
+document.querySelectorAll(".nav-btn").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    curNav = parseInt(btn.dataset.nav);
+    curItem = 0;
+    renderList(); renderContent();
+  };
+});
+renderList(); renderContent();
+</script>
+</body>
+</html>

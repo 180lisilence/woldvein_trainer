@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 构建产物
+dist/
+dist_final/
+build/
+*.spec.bak
+
+# 二进制产物
+*.exe
+*.dll
+*.pdb
+*.lib
+*.exp
+
+# 日志
+logs/
+temp_logs/
+*.log
+
+# 旧版本
+old_versions/
+
+# 探针
+probes/
+
+# 安装包编译产物
+installer_build/*.exe
+installer_build/Output/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+Thumbs.db
+Desktop.ini

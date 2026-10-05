@@ -1,0 +1,224 @@
+"""
+woldvein Trainer v0.4.6 - 多语言国际化 (i18n) 模块
+
+支持多语言界面切换，当前支持：
+    - 简体中文 (zh-CN)
+    - 英文 (en-US)
+
+使用方式：
+    from .i18n import I18nManager, t
+    i18n = I18nManager()
+    i18n.set_language("en-US")
+    print(t("file.save"))  # 输出 "Save"
+
+语言文件位置：locales/ 目录下，每个语言一个 JSON 文件。
+"""
+import os
+import sys
+import json
+import threading
+
+from .logger import log, log_success, log_error, log_warning
+
+# 支持的语言
+SUPPORTED_LANGUAGES = {
+    "zh-CN": "简体中文",
+    "en-US": "English",
+}
+
+# 默认语言
+DEFAULT_LANGUAGE = "zh-CN"
+
+
+class I18nManager:
+    """国际化管理器"""
+
+    def __init__(self, language=None):
+        """
+        参数：
+            language: 初始语言，None 则使用默认
+        """
+        self._current_language = DEFAULT_LANGUAGE
+        self._translations = {}
+        self._fallback = {}  # 回退语言（中文）
+        self._lock = threading.Lock()
+        self._listeners = []
+
+        # 加载回退语言（中文，作为默认值）
+        self._fallback = self._load_language(DEFAULT_LANGUAGE)
+
+        # 设置当前语言
+        if language and language in SUPPORTED_LANGUAGES:
+            self.set_language(language)
+        else:
+            self._translations = self._fallback
+
+    def _get_locales_dir(self):
+        """获取语言文件目录"""
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base, "locales")
+
+    def _load_language(self, language):
+        """加载语言文件。
+
+        返回：
+            翻译字典，失败返回空字典
+        """
+        locales_dir = self._get_locales_dir()
+        lang_file = os.path.join(locales_dir, f"{language}.json")
+
+        if not os.path.exists(lang_file):
+            log_warning(f"[i18n] 语言文件不存在: {lang_file}")
+            return {}
+
+        try:
+            with open(lang_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            log(f"[i18n] 已加载语言: {language} ({len(data)} 条翻译)")
+            return data
+        except Exception as e:
+            log_error(f"[i18n] 加载语言文件失败: {e}")
+            return {}
+
+    def set_language(self, language):
+        """切换语言。
+
+        参数：
+            language: 语言代码（如 "zh-CN", "en-US"）
+
+        返回：
+            True 成功，False 失败
+        """
+        if language not in SUPPORTED_LANGUAGES:
+            log_error(f"[i18n] 不支持的语言: {language}")
+            return False
+
+        with self._lock:
+            translations = self._load_language(language)
+            if translations:
+                self._translations = translations
+                self._current_language = language
+                log_success(f"[i18n] 语言已切换为: {SUPPORTED_LANGUAGES[language]}")
+                self._notify_listeners()
+                return True
+            else:
+                # 加载失败，使用回退
+                self._translations = self._fallback
+                self._current_language = DEFAULT_LANGUAGE
+                log_warning(f"[i18n] 加载失败，回退到默认语言")
+                return False
+
+    def get_language(self):
+        """获取当前语言代码。"""
+        return self._current_language
+
+    def get_language_name(self):
+        """获取当前语言显示名称。"""
+        return SUPPORTED_LANGUAGES.get(self._current_language, self._current_language)
+
+    def translate(self, key, **kwargs):
+        """翻译文本。
+
+        参数：
+            key: 翻译键，如 "file.save"
+            **kwargs: 格式化参数（如 name="test"）
+
+        返回：
+            翻译后的文本，找不到时返回 key 本身
+        """
+        with self._lock:
+            # 先查当前语言
+            text = self._translations.get(key)
+            # 找不到则查回退语言
+            if text is None:
+                text = self._fallback.get(key)
+            # 还是找不到则返回 key
+            if text is None:
+                return key
+            # 格式化参数
+            if kwargs:
+                try:
+                    text = text.format(**kwargs)
+                except (KeyError, IndexError):
+                    pass
+            return text
+
+    def t(self, key, **kwargs):
+        """translate 的简写。"""
+        return self.translate(key, **kwargs)
+
+    def add_listener(self, listener):
+        """添加语言切换监听器。
+
+        参数：
+            listener: 回调函数 listener(new_language)
+        """
+        self._listeners.append(listener)
+
+    def remove_listener(self, listener):
+        """移除监听器。"""
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def _notify_listeners(self):
+        """通知所有监听器。"""
+        for listener in self._listeners:
+            try:
+                listener(self._current_language)
+            except Exception as e:
+                log_error(f"[i18n] 监听器异常: {e}")
+
+    def get_available_languages(self):
+        """获取所有可用语言。
+
+        返回：
+            {code: name, ...}
+        """
+        return dict(SUPPORTED_LANGUAGES)
+
+    def get_missing_translations(self):
+        """获取当前语言缺失的翻译键（对比回退语言）。
+
+        返回：
+            [key, ...]
+        """
+        missing = []
+        for key in self._fallback:
+            if key not in self._translations:
+                missing.append(key)
+        return missing
+
+
+# 全局 i18n 管理器单例
+_global_i18n = None
+
+
+def get_i18n():
+    """获取全局 i18n 管理器"""
+    global _global_i18n
+    if _global_i18n is None:
+        _global_i18n = I18nManager()
+    return _global_i18n
+
+
+def t(key, **kwargs):
+    """便捷翻译函数。
+
+    使用方式：
+        from .i18n import t
+        label_text = t("file.save")
+    """
+    return get_i18n().translate(key, **kwargs)
+
+
+def set_language(language):
+    """便捷切换语言函数。"""
+    return get_i18n().set_language(language)
+
+
+def get_current_language():
+    """获取当前语言。"""
+    return get_i18n().get_language()
