@@ -189,19 +189,19 @@ class TestUiPanel(unittest.TestCase):
         return root, app
 
     def test_sidebar_has_optimize_nav(self):
-        """v0.4.9：优化必须是侧边栏独立导航项，而不是工具页的子项"""
+        """优化必须是侧边栏独立导航项，而不是工具页的子项"""
         root, app = self._make_app()
         try:
-            # 侧边栏应有 8 个导航按钮（7 个主项 + 设置）
-            self.assertGreaterEqual(len(app.nav_buttons), 8,
+            # v0.5.0：侧边栏有 9 个导航按钮（8 个主项 + 设置）
+            self.assertGreaterEqual(len(app.nav_buttons), 9,
                                     f"侧边栏只有 {len(app.nav_buttons)} 个按钮")
             names = [b.cget("text") for b in app.nav_buttons]
             self.assertIn("优化", names, f"侧边栏缺少「优化」，现有：{names}")
             # 优化必须在「工具」之后
             self.assertGreater(names.index("优化"), names.index("工具"))
-            # 导航索引表要有对应项
-            self.assertIn(6, app.func_data)
-            self.assertEqual([t[1] for t in app.func_data[6]][0], "优化档位")
+            # v0.5.0 重排：优化 = 3（0.4.9 侧边栏已是第 3 位，但 func_data 仍是旧顺序，已修正）
+            self.assertIn(3, app.func_data)
+            self.assertEqual([t[1] for t in app.func_data[3]][0], "优化档位")
             # 引擎优化不应再挂在工具页下
             tool_names = [t[1] for t in app.func_data[2]]
             self.assertNotIn("引擎优化", tool_names, "工具页不应再保留引擎优化")
@@ -211,10 +211,37 @@ class TestUiPanel(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_nav_index_alignment(self):
+        """v0.5.0：侧边栏顺序 / func_data 键 / _update_action_panel 分支必须一致"""
+        root, app = self._make_app()
+        try:
+            names = [b.cget("text") for b in app.nav_buttons]
+            # 侧边栏第 3 位是「优化」，那么 func_data[3] 的首项必须是优化档位
+            self.assertEqual(names[3], "优化")
+            self.assertEqual([t[1] for t in app.func_data[3]][0], "优化档位")
+            # 侧边栏第 4 位是「存档」，func_data[4] 首项必须是存档列表
+            self.assertEqual(names[4], "存档")
+            self.assertEqual([t[1] for t in app.func_data[4]][0], "存档列表")
+            # 切到「优化」不能渲染出存档面板
+            app._switch_nav(3)
+            texts = "\n".join(_collect_texts(app.content_inner, []))
+            self.assertIn("优化档位", texts)
+            self.assertNotIn("存档管理", texts, "点「优化」却渲染出存档面板 —— 索引又错位了")
+            # 切到「存档」不能渲染出优化面板
+            app._switch_nav(4)
+            texts = "\n".join(_collect_texts(app.content_inner, []))
+            self.assertIn("存档管理", texts)
+            self.assertNotIn("优化档位", texts, "点「存档」却渲染出优化面板 —— 索引又错位了")
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
     def test_perf_nav_renders(self):
         root, app = self._make_app()
         try:
-            app._switch_nav(6)          # 侧边栏「优化」
+            app._switch_nav(3)          # 侧边栏「优化」
             self.assertTrue(hasattr(app, "_build_perf_tools"))
             texts = _collect_texts(app.content_inner, [])
             self.assertIn("优化档位", "\n".join(texts))
@@ -229,7 +256,7 @@ class TestUiPanel(unittest.TestCase):
         """四个子项各自渲染出对应分区，内容不能都一样"""
         root, app = self._make_app()
         try:
-            app._switch_nav(6)
+            app._switch_nav(3)
             seen = {}
             for func, must in ((0, "优化档位"), (1, "改动明细"),
                                (2, "锁定高性能独显"), (3, "一键还原到备份")):
@@ -262,13 +289,13 @@ class TestUiPanel(unittest.TestCase):
                 pass
 
     def test_settings_nav_shifted(self):
-        """设置导航应顺延到 7，不能被新导航项挤掉"""
+        """v0.5.0：新增「离线」后设置顺延到 8，不能被新导航项挤掉"""
         root, app = self._make_app()
         try:
-            app._switch_nav(7)
+            app._switch_nav(8)
             texts = "\n".join(_collect_texts(app.content_inner, []))
             self.assertTrue(any(k in texts for k in ("热键", "日志", "MOD", "版本")),
-                            f"nav 7 未渲染设置页，实际内容：{texts[:120]}")
+                            f"nav 8 未渲染设置页，实际内容：{texts[:120]}")
         finally:
             try:
                 root.destroy()

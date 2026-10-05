@@ -63,6 +63,14 @@ from src.perf_optimizer import (
     _dynamic_value as perf_dyn,
 )
 
+# 新增模块导入（v0.5.0 离线化 / 免 Steam 启动）
+from src import offline_crack
+from src.offline_crack import (
+    status as oc_status, install as oc_install, uninstall as oc_uninstall,
+    launch as oc_launch, kill_game as oc_kill, last_login as oc_last_login,
+    self_check as oc_self_check, payload_ready as oc_payload_ready,
+)
+
 # ============================================================
 # 配色（微信风格）
 # ============================================================
@@ -103,8 +111,10 @@ FONT = "微软雅黑"
 # 自动适配开发环境和 PyInstaller 打包环境。
 # 打包后注入器可能不在机器上：这里必须能容忍取不到（返回空串），
 # 否则模块级求值会打断整个 import，exe 一启动就崩。
-try:/n    DLL_PATH = get_dll_path() or ""
-except Exception:/n    DLL_PATH = ""
+try:
+    DLL_PATH = get_dll_path() or ""
+except Exception:
+    DLL_PATH = ""
 VERSION = f"v{APP_VERSION}"  # 版本号唯一源：src/constants.py::APP_VERSION
 
 
@@ -155,6 +165,9 @@ class TrainerApp:
 
     def _update_status(self):
         try:
+            # 注入器不可用（常见于打包后 exe 单独运行）时不要静默 —— 记一次，主页会显示
+            from src import injector as _inj
+            self.injector_error = getattr(_inj, "last_error", None) if not _inj.locate_injector() else None
             result = find_game_process()
             self.game_pid = result[0] if (result and isinstance(result, tuple) and result[0]) else (result if not isinstance(result, tuple) else None)
             self.dll_injected = is_dll_injected(self.game_pid, "woldvein_trainer.dll") if self.game_pid else False
@@ -163,7 +176,9 @@ class TrainerApp:
             pass
 
     def _refresh_status_display(self):
-        if self.game_pid and self.dll_injected:
+        if getattr(self, "injector_error", None):
+            color, text = COLORS["error"], "注入器不可用 · 其余功能照常"
+        elif self.game_pid and self.dll_injected:
             color, text = COLORS["success"], "游戏运行中 · DLL已注入"
         elif self.game_pid:
             color, text = COLORS["warning"], "游戏运行中 · DLL未注入"
@@ -352,10 +367,12 @@ class TrainerApp:
         self.sidebar = tk.Frame(parent, bg=COLORS["bg_sidebar"], width=90)
         self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
         self.sidebar.pack_propagate(False)
-        # v0.4.9：新增「优化」独立导航（引擎性能优化），索引插在工具之后，
-        # 原「存档/监控/内部」顺延一位，设置由 6 变为 7，见 func_data 与 _update_action_panel。
+        # v0.5.0 索引表（与 func_data / _update_action_panel 严格一一对应）
+        #   0 主页  1 创造  2 工具  3 优化  4 存档  5 监控  6 内部  7 离线  8 设置
+        # 注意：v0.4.9 曾把「优化」插在侧边栏第 3 位，但 func_data 仍是旧顺序，
+        # 导致点「⚡优化」弹出的是存档面板。0.5.0 已把三处顺序统一按本表对齐。
         NAV_ITEMS = [("🏠","主页"),("✨","创造"),("🔧","工具"),("⚡","优化"),
-                     ("💾","存档"),("📊","监控"),("📦","内部")]
+                     ("💾","存档"),("📊","监控"),("📦","内部"),("🔓","离线")]
         for i, (icon, name) in enumerate(NAV_ITEMS):
             btn = tk.Button(self.sidebar, text=name, font=(FONT, 11), bg=COLORS["bg_sidebar"],
                           fg=COLORS["fg_sidebar"], bd=0, relief=tk.FLAT, cursor="hand2",
@@ -374,7 +391,7 @@ class TrainerApp:
         settings_btn = tk.Button(self.sidebar, text="设置", font=(FONT, 11), bg=COLORS["bg_sidebar"],
                                fg=COLORS["fg_sidebar"], bd=0, relief=tk.FLAT, cursor="hand2",
                                activebackground=COLORS["bg_sidebar_sel"], activeforeground=COLORS["fg_sidebar_sel"],
-                               command=lambda: self._switch_nav(7))
+                               command=lambda: self._switch_nav(8))
         settings_btn.pack(fill=tk.X, pady=4, padx=8)
         self.nav_buttons.append(settings_btn)
 
@@ -412,8 +429,8 @@ class TrainerApp:
         self.list_canvas.bind("<MouseWheel>", lambda e: self._on_mousewheel(e, self.list_canvas))
         self.list_inner.bind("<MouseWheel>", lambda e: self._on_mousewheel(e, self.list_canvas))
 
-        # v0.4.9 索引表（与 _build_sidebar 的 NAV_ITEMS 一一对应）
-        #   0 主页  1 创造  2 工具  3 存档  4 监控  5 内部  6 优化  7 设置
+        # v0.5.0 索引表（与 _build_sidebar 的 NAV_ITEMS 严格一一对应）
+        #   0 主页  1 创造  2 工具  3 优化  4 存档  5 监控  6 内部  7 离线  8 设置
         self.func_data = {
             0: [("","游戏概览","查看游戏运行状态",False),("","快速操作","启动游戏/注入DLL",True)],
             1: [("","鸿业满级","鸿业等级满级",False),("","全建筑解锁","解锁所有建筑",False),
@@ -424,15 +441,19 @@ class TrainerApp:
                 ("","地块解锁","解锁地块",False),("","天赋系统","天赋满级",False),
                 ("","灾害控制","清除灾害",False),("","节日控制","节日管理",False),
                 ("","核心数值","直接设置",False),("","一键全开","全部作弊",True)],
-            3: [("","存档列表","查看存档",False),("","存档备份","备份存档",False),
-                ("","存档恢复","恢复备份",False),("","清理备份","清理旧备份",False)],
-            4: [("","进程监控","内存/CPU/状态",False)],
-            5: [("","资源修改","0.3.1 首页改资源面板（复刻）",False)],
-            6: [("","优化档位","保守/均衡/极致，改引擎出厂参数",False),
+            3: [("","优化档位","保守/均衡/极致，改引擎出厂参数",False),
                 ("","改动明细","当前值 vs 目标值对照",False),
                 ("","系统侧优化","锁独显 / 关全屏优化",False),
                 ("","还原","回滚到备份的原始配置",False)],
-            7: [("","热键设置","全局热键",False),("","日志管理","日志路径",False),
+            4: [("","存档列表","查看存档",False),("","存档备份","备份存档",False),
+                ("","存档恢复","恢复备份",False),("","清理备份","清理旧备份",False)],
+            5: [("","进程监控","内存/CPU/状态",False)],
+            6: [("","资源修改","0.3.1 首页改资源面板（复刻）",False)],
+            7: [("","安装/卸载","部署或还原离线补丁",True),
+                ("","状态总览","查 dll / lua / 登录状态",False),
+                ("","启动游戏","离线拉起（不走 Steam）",False),
+                ("","原理说明","两层方案与排错",False)],
+            8: [("","热键设置","全局热键",False),("","日志管理","日志路径",False),
                 ("","MOD管理","散文件MOD",False),("","关于","版本信息",False)],
         }
 
@@ -476,7 +497,7 @@ class TrainerApp:
         for i, (nav_idx, func_idx, icon, name, desc, dot) in enumerate(all_results):
             if nav_idx != current_nav:
                 current_nav = nav_idx
-                nav_names = ["主页", "创造", "工具", "存档", "监控", "内部", "设置"]
+                nav_names = ["主页", "创造", "工具", "优化", "存档", "监控", "内部", "离线", "设置"]
                 tk.Label(self.list_inner, text=f"── {nav_names[nav_idx]} ──",
                         font=(FONT, 9), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
                         anchor="w").pack(fill=tk.X, padx=12, pady=(8, 2))
@@ -663,15 +684,16 @@ class TrainerApp:
         self._monitor_running = False
         for w in self.content_inner.winfo_children():
             w.destroy()
-        # v0.4.9：「优化」升为侧边栏独立导航（nav 6），设置顺延到 7
+        # v0.5.0：顺序与 NAV_ITEMS / func_data 一致（修掉 0.4.9 优化↔存档错位）
         if nav == 0: self._build_home()
         elif nav == 1: self._build_creative()
         elif nav == 2: self._build_tools(func)
-        elif nav == 3: self._build_save(func)
-        elif nav == 4: self._build_monitor()
-        elif nav == 5: self._build_internal(func)
-        elif nav == 6: self._build_perf_tools(func)
-        elif nav == 7: self._build_settings(func)
+        elif nav == 3: self._build_perf_tools(func)
+        elif nav == 4: self._build_save(func)
+        elif nav == 5: self._build_monitor()
+        elif nav == 6: self._build_internal(func)
+        elif nav == 7: self._build_offline_tools(func)
+        elif nav == 8: self._build_settings(func)
         self._bind_mousewheel(self.content_inner, self.content_canvas)
         self._bind_mousewheel(self.content_inner, self.content_canvas)
 
@@ -1491,6 +1513,288 @@ class TrainerApp:
             messagebox.showinfo("完成", res["msg"])
         else:
             messagebox.showerror("失败", res["msg"])
+
+    # ============================================================
+    # 离线页（v0.5.0）
+    # ============================================================
+    def _build_offline_tools(self, func=0):
+        """
+        「离线」导航页渲染入口。4 个子项：安装/卸载、状态总览、启动游戏、原理说明。
+        每个子页顶部都会画状态条，切子项时上下文不丢。
+        """
+        builder = {
+            0: self._build_oc_install,
+            1: self._build_oc_status,
+            2: self._build_oc_launch,
+            3: self._build_oc_notes,
+        }.get(func, self._build_oc_install)
+        st = self._oc_draw_header()
+        builder(st)
+
+    def _oc_draw_header(self):
+        """画离线页共用顶部状态条，返回 status() 字典（查询失败返回 None）。"""
+        st = oc_status()
+        g = self._group("🔓 离线化状态")
+        if not st.get("ok"):
+            tk.Label(g, text=st.get("msg", "状态查询失败"), font=(FONT, 11),
+                     bg=COLORS["bg_card"], fg=COLORS["error"], anchor="w",
+                     justify=tk.LEFT).pack(fill=tk.X, padx=16, pady=8)
+            return None
+        if not st.get("exe_exists"):
+            tk.Label(g, text=st.get("msg", "游戏路径无效"), font=(FONT, 11),
+                     bg=COLORS["bg_card"], fg=COLORS["error"], anchor="w",
+                     justify=tk.LEFT).pack(fill=tk.X, padx=16, pady=8)
+            return None
+
+        installed = st.get("installed")
+        tk.Label(g, text=("✅ " if installed else "⭕ ") + st.get("summary", ""),
+                 font=(FONT, 13, "bold"), bg=COLORS["bg_card"],
+                 fg=COLORS["success"] if installed else COLORS["warning"],
+                 anchor="w").pack(fill=tk.X, padx=16, pady=(4, 6))
+
+        tk.Label(g, text="游戏目录：" + str(st.get("game_path", "")),
+                 font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                 anchor="w", justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(0, 2))
+
+        dll_map = {"emulator": "模拟器（已替换）", "original": "原版 Steam DLL",
+                   "unknown": "未知 DLL（非本工具写入）", "missing": "缺失"}
+        rows = [
+            ("steam_api64.dll", dll_map.get(st.get("dll_state"), "?")),
+            ("lua 散文件", "%d/%d 就位" % (len(st.get("lua_present", [])),
+                                        len(st.get("lua_present", [])) + len(st.get("lua_missing", [])))),
+            ("publish=0", "已写入" if st.get("publish_zero") else "未写入"),
+            ("原 dll 备份", "有" if st.get("dll_backup") else "无"),
+            ("游戏进程", "运行中" if st.get("game_running") else "未运行"),
+            ("steam 进程", "运行中（安装后会避免唤醒）" if st.get("steam_running") else "未运行"),
+        ]
+        for k, v in rows:
+            row = tk.Frame(g, bg=COLORS["bg_card"])
+            row.pack(fill=tk.X, padx=16, pady=1)
+            tk.Label(row, text=k, width=18, font=(FONT, 10), bg=COLORS["bg_card"],
+                     fg=COLORS["fg_muted"], anchor="w").pack(side=tk.LEFT)
+            tk.Label(row, text=v, font=(FONT, 10), bg=COLORS["bg_card"],
+                     fg=COLORS["fg"], anchor="w").pack(side=tk.LEFT)
+        return st
+
+    def _build_oc_install(self, st):
+        """子项 0：安装 / 卸载"""
+        okp, pmsg = oc_payload_ready()
+        g2 = self._group("📦 安装离线补丁")
+        if not okp:
+            tk.Label(g2, text="内置补丁不完整：" + pmsg, font=(FONT, 11),
+                     bg=COLORS["bg_card"], fg=COLORS["error"], anchor="w",
+                     justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=8)
+        else:
+            tk.Label(g2, text="内置补丁齐全（模拟器 dll + 4 个 lua 散文件）。\n"
+                              "安装会：备份原 steam_api64.dll → 放入模拟器 → 部署 lua → 写 publish=0。\n"
+                              "游戏本体 exe 不会被改动。",
+                     font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                     anchor="w", justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(2, 8))
+            bf = tk.Frame(g2, bg=COLORS["bg_card"])
+            bf.pack(fill=tk.X, padx=16, pady=6)
+            self._btn(bf, "🔓 一键安装离线补丁", "primary", self._on_oc_install).pack(side=tk.LEFT, padx=5)
+            self._btn(bf, "↩ 卸载还原", "danger", self._on_oc_uninstall).pack(side=tk.LEFT, padx=5)
+            self._btn(bf, "🔄 刷新", "normal", self._rebuild_current_page).pack(side=tk.LEFT, padx=5)
+
+        g2b = self._group("🧪 自检")
+        bf2 = tk.Frame(g2b, bg=COLORS["bg_card"])
+        bf2.pack(fill=tk.X, padx=16, pady=8)
+        self._btn(bf2, "运行自检", "normal", self._on_oc_selfcheck).pack(side=tk.LEFT, padx=5)
+        tk.Label(g2b, text="检查内置补丁、游戏路径、状态查询、登录日志解析 4 项是否正常。",
+                 font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                 anchor="w", justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(0, 6))
+
+    def _build_oc_status(self, st):
+        """子项 1：状态总览（lua 明细 + 最近一次登录结果）"""
+        if st is None:
+            return
+        g = self._group("📄 lua 散文件明细")
+        for rel in st.get("lua_present", []):
+            row = tk.Frame(g, bg=COLORS["bg_card"])
+            row.pack(fill=tk.X, padx=16, pady=1)
+            tk.Label(row, text="✅", font=(FONT, 10), bg=COLORS["bg_card"],
+                     fg=COLORS["success"]).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(row, text=rel, font=(FONT, 10), bg=COLORS["bg_card"],
+                     fg=COLORS["fg"], anchor="w").pack(side=tk.LEFT)
+        for rel in st.get("lua_missing", []):
+            row = tk.Frame(g, bg=COLORS["bg_card"])
+            row.pack(fill=tk.X, padx=16, pady=1)
+            tk.Label(row, text="⭕", font=(FONT, 10), bg=COLORS["bg_card"],
+                     fg=COLORS["fg_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+            tk.Label(row, text=rel + "（缺失）", font=(FONT, 10), bg=COLORS["bg_card"],
+                     fg=COLORS["fg_muted"], anchor="w").pack(side=tk.LEFT)
+        if not st.get("lua_present") and not st.get("lua_missing"):
+            tk.Label(g, text="未检测到任何 lua 散文件。", font=(FONT, 10),
+                     bg=COLORS["bg_card"], fg=COLORS["fg_muted"], anchor="w").pack(fill=tk.X, padx=16, pady=6)
+
+        lg = oc_last_login()
+        g2 = self._group("🪪 最近一次登录")
+        if lg.get("found"):
+            lines = [
+                "登录结果：%s" % ("成功" if lg.get("login") else "失败"),
+                "用户名：%s" % lg.get("username"),
+                "账号：%s" % lg.get("account"),
+                "在线模式：%s" % ("是" if lg.get("online") else "否（离线）"),
+            ]
+            color = COLORS["success"] if lg.get("login") else COLORS["error"]
+        else:
+            lines = [lg.get("msg", "无日志")]
+            color = COLORS["fg_muted"]
+        for txt in lines:
+            tk.Label(g2, text=txt, font=(FONT, 10, "bold") if txt.startswith("登录结果") else (FONT, 10),
+                     bg=COLORS["bg_card"], fg=color if txt.startswith("登录结果") else COLORS["fg"],
+                     anchor="w").pack(fill=tk.X, padx=16, pady=1)
+        if lg.get("log"):
+            tk.Label(g2, text="日志：" + str(lg.get("log")), font=(FONT, 9),
+                     bg=COLORS["bg_card"], fg=COLORS["fg_muted"], anchor="w").pack(fill=tk.X, padx=16, pady=(4, 2))
+        if lg.get("expired_toast"):
+            tk.Label(g2, text="⚠ 日志里出现「第三方验证过期 / 重启后再试」——离线补丁没生效，请重新安装。",
+                     font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["error"], anchor="w",
+                     justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(4, 6))
+        bf = tk.Frame(g2, bg=COLORS["bg_card"])
+        bf.pack(fill=tk.X, padx=16, pady=8)
+        self._btn(bf, "🔄 刷新", "normal", self._rebuild_current_page).pack(side=tk.LEFT, padx=5)
+
+    def _build_oc_launch(self, st):
+        """子项 2：启动游戏（离线）"""
+        g = self._group("🚀 启动")
+        tk.Label(g, text="必须从 bin64 目录作为工作目录启动，否则游戏会闪退（日志只写 98 字节就退出）。\n"
+                         "本按钮会自动以 bin64 为 CWD 拉起，并且不会唤醒 Steam。",
+                 font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                 anchor="w", justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(2, 8))
+        bf = tk.Frame(g, bg=COLORS["bg_card"])
+        bf.pack(fill=tk.X, padx=16, pady=6)
+        self._btn(bf, "🎮 启动游戏（离线）", "primary", self._on_oc_launch).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "⏹ 结束游戏进程", "danger", self._on_oc_kill).pack(side=tk.LEFT, padx=5)
+        self._btn(bf, "🔄 刷新", "normal", self._rebuild_current_page).pack(side=tk.LEFT, padx=5)
+
+        g2 = self._group("❗ 排错")
+        for txt in [
+            "· 闪退：确认是从本页按钮启动，或手动 cd 到 bin64 再运行 exe；不要在 Steam 库里点启动。",
+            "· 仍弹「第三方验证过期」：lua 没被加载，回「安装/卸载」重装，再看状态总览。",
+            "· 还是唤醒 Steam：dll 没换成模拟器，看状态条的 steam_api64.dll 一行。",
+            "· 装了补丁后想走正版：先卸载还原，再 Steam 校验游戏文件。",
+        ]:
+            tk.Label(g2, text=txt, font=(FONT, 10), bg=COLORS["bg_card"],
+                     fg=COLORS["fg"], anchor="w", justify=tk.LEFT,
+                     wraplength=620).pack(fill=tk.X, padx=16, pady=2)
+
+    def _build_oc_notes(self, st):
+        """子项 3：原理说明"""
+        g = self._group("🧩 为什么要两层")
+        tk.Label(g, text="第一层 · Lua 短路登录", font=(FONT, 11, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["accent"], anchor="w").pack(fill=tk.X, padx=16, pady=(4, 2))
+        tk.Label(g, text="游戏用金山 XG SDK（channel=11，XGJinShanWithSteamV2）。正常流程是拿 Steam 票据去服务器换登录结果，\n"
+                         "「第三方验证过期」这句提示是服务端下发的，exe / config / lua 里都搜不到。\n"
+                         "所以伪造票据没用——服务器不认。正确做法是在 sim_common 散文件里把 TryLogin 短路掉，\n"
+                         "直接回调成一个本地成功结果，压根不发请求，服务器也就无从拒绝。",
+                 font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg"], anchor="w",
+                 justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(0, 6))
+
+        tk.Label(g, text="第二层 · Steam 模拟器 dll", font=(FONT, 11, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["accent"], anchor="w").pack(fill=tk.X, padx=16, pady=(4, 2))
+        tk.Label(g, text="XG 的 steam_service 会调 SteamAPI_RestartAppIfNecessary，把 Steam 拉起来。\n"
+                         "自写的 steam_api64.dll 让这个接口返回 0（不需要重启/不需要 Steam），并伪造 SteamID、AppID、语言、昵称，\n"
+                         "让引擎侧的自检全部通过。这一层只负责「别唤醒 Steam」，不负责登录。",
+                 font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg"], anchor="w",
+                 justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(0, 6))
+
+        tk.Label(g, text="散文件优先级", font=(FONT, 11, "bold"),
+                 bg=COLORS["bg_card"], fg=COLORS["accent"], anchor="w").pack(fill=tk.X, padx=16, pady=(4, 2))
+        tk.Label(g, text="游戏根\\sim_common\\script\\** 优先于 pak 包。证据：往 xgagent_manager.lua 插 2 行后，\n"
+                         "日志里 user init 的行号从 :173 变成 :175，说明读的确实是散文件。",
+                 font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg"], anchor="w",
+                 justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(0, 6))
+
+        g2 = self._group("⚠ 边界")
+        for txt in [
+            "· 云存档、成就、客服反馈等联机功能不可用。",
+            "· 必须从本页按钮启动或手动 cd 到 bin64 启动，不能从 Steam 库启动（dll 已被替换）。",
+            "· 日志每 60 秒出现一次 Start get ticket 是后台刷新，属于无害噪音。",
+        ]:
+            tk.Label(g2, text=txt, font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                     anchor="w", justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=2)
+
+    # ---- 离线页回调 ----
+    def _on_oc_install(self):
+        if oc_status().get("game_running"):
+            messagebox.showerror("无法安装", "游戏正在运行，dll 被占用。请先关闭游戏。")
+            return
+        if not messagebox.askyesno(
+                "安装离线补丁",
+                "将把 bin64\\steam_api64.dll 换成模拟器（原文件备份为 .orig），\n"
+                "并向游戏根目录部署 4 个 lua 散文件，同时在 config.cfg 写入 publish=0。\n\n"
+                "游戏本体 exe 不会被修改，随时可卸载还原。\n\n确定安装？"):
+            return
+        res = oc_install()
+        if res.get("ok"):
+            log_success("[离线] 安装完成")
+            messagebox.showinfo("安装完成", res.get("msg", "") + "\n\n" +
+                                "\n".join("· " + s for s in res.get("steps", [])))
+        else:
+            log_error("[离线] 安装失败: %s" % res.get("msg"))
+            messagebox.showerror("安装失败", res.get("msg", "未知错误"))
+        self._rebuild_current_page()
+
+    def _on_oc_uninstall(self):
+        if oc_status().get("game_running"):
+            messagebox.showerror("无法卸载", "游戏正在运行，dll 被占用。请先关闭游戏。")
+            return
+        if not messagebox.askyesno("卸载还原",
+                                   "将还原原版 steam_api64.dll，删除 4 个 lua 散文件，并移除 publish=0。\n\n"
+                                   "卸载后游戏需要 Steam 正常登录。确定卸载？"):
+            return
+        res = oc_uninstall()
+        if res.get("ok"):
+            log_success("[离线] 已卸载还原")
+            messagebox.showinfo("卸载完成", res.get("msg", "") + "\n\n" +
+                                "\n".join("· " + s for s in res.get("steps", [])))
+        else:
+            messagebox.showerror("卸载失败", res.get("msg", "未知错误"))
+        self._rebuild_current_page()
+
+    def _on_oc_launch(self):
+        st = oc_status()
+        if st.get("game_running"):
+            messagebox.showinfo("已在运行", "游戏进程已经在运行了。")
+            return
+        if not st.get("installed"):
+            if not messagebox.askyesno("尚未安装",
+                                       "离线补丁还没装，直接启动会走 Steam 正常登录。\n\n"
+                                       "仍要以离线方式启动吗？"):
+                return
+        res = oc_launch()
+        if res.get("ok"):
+            log_success("[离线] 已启动游戏（CWD=bin64）")
+        else:
+            log_error("[离线] 启动失败: %s" % res.get("msg"))
+            messagebox.showerror("启动失败", res.get("msg", "未知错误"))
+        self._rebuild_current_page()
+
+    def _on_oc_kill(self):
+        if not oc_status().get("game_running"):
+            messagebox.showinfo("未运行", "没有检测到游戏进程。")
+            return
+        res = oc_kill()
+        log_success("[离线] 已结束游戏进程" if res.get("ok") else "[离线] 结束失败")
+        self._rebuild_current_page()
+
+    def _on_oc_selfcheck(self):
+        res = oc_self_check()
+        try:
+            passed, total, items = res
+        except Exception:
+            passed, total, items = 0, 0, []
+        lines = []
+        for it in items:
+            try:
+                ok, name, detail = it
+            except Exception:
+                continue
+            lines.append("%s %s —— %s" % ("✅" if ok else "❌", name, detail))
+        body = "\n".join(lines) or "（无检查项）"
+        messagebox.showinfo("离线模块自检", "%d/%d 通过\n\n%s" % (passed, total, body))
+        self._rebuild_current_page()
 
     # ===== 存档页 =====
     def _build_save(self, func):

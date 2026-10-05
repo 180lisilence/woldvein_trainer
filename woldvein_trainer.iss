@@ -2,7 +2,7 @@
 ; 使用 Inno Setup 6 编译
 
 #define MyAppName "Woldvein Trainer"
-#define MyAppVersion "0.4.9"
+#define MyAppVersion "0.5.0"
 #define MyAppPublisher "Woldvein"
 #define MyAppExeName "woldvein_trainer.exe"
 

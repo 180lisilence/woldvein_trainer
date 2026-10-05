@@ -1,9 +1,9 @@
 @echo off
 chcp 936 >nul
 cd /d "%~dp0"
-title 一键打包 - 平野孤鸿修改器 v0.4.9
+title 一键打包 - 平野孤鸿修改器 v0.5.0（主线）
 echo ============================================================
-echo   平野孤鸿修改器 v0.4.9
+echo   平野孤鸿修改器 v0.5.0（主线）
 echo   spec : woldvein_trainer.spec
 echo   模式 : onefile
 echo   产物 : dist\woldvein_trainer.exe

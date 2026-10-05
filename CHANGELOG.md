@@ -1,5 +1,94 @@
 # 平野孤鸿项目变更日志
 
+## v0.5.0 (2026-10-05)
+
+### 修复：打包产物启动即崩（打包链路全面加固）
+打包出来的 exe 双击后**秒退、连窗口都没有**，弹窗内容为：
+`未找到 woldvein_injector v0.4.7`。三个叠加的根因：
+
+1. **模块级求值打断 import**（致命）：`trainer_ui_tk.py` 在模块级执行
+   `DLL_PATH = get_dll_path()`。onefile 下 `__file__` 指向 `_MEIxxxx` 临时目录，
+   注入器定位全部落空 → `get_client()` 抛 RuntimeError → 导入失败 → 进程直接退出。
+   - `src/injector_client.py`：`_candidate_paths()` 增加 frozen 分支 ——
+     以 `sys.executable` 目录为起点逐级向上 6 层找 `injector\<name>` 与
+     `trainers\injector\<name>`；新增 `try_get_client()`（返回 `(client, err)`，**绝不抛**）。
+   - `src/injector/__init__.py`：整份重写为**降级 shim** —— 注入器不可用时
+     `find_game_process→None` / `inject_dll→False` / `get_dll_path→""` 等，
+     修改器的离线 / 优化 / 存档等页面照常可用。
+   - `trainer_ui_tk.py`：`DLL_PATH` 包 try；状态条新增「注入器不可用 · 其余功能照常」。
+2. **spec 漏资源**：`datas` 缺 `locales`/`presets`，`hiddenimports` 缺
+   `src.offline_crack`/`src.perf_optimizer`/`src.injector_client`。
+   另外 `i18n.py`/`preset_manager.py` 在 frozen 下按 exe 目录找资源，
+   而 onefile 的资源在 `sys._MEIPASS` —— 已改为「先找 exe 旁、回退 _MEIPASS」。
+3. **UPX 关闭**：`upx=True` 常被杀软误报，且每次启动都要多解压一遍，改为 `False`。
+
+**打包链路加固**（防止再出现「打包成功但跑不起来」）：
+- 新增 `trainers/tools/post_build.py`，由「一键打包.bat」第 4 步调用：
+  校验产物体积；读归档 TOC（onefile）或 `_internal/`（onedir）**确认资源真的进了包**；
+  把注入器精简副本放到 `dist\injector\woldvein_injector0.4.7`，使 dist 可整体拷走。
+  任一失败 exit 1，bat 直接报错，不再出现「看着成功、实际跑不了」。
+- 新增 `trainers/tools/probe_exe.py`：启动产物并枚举全部可见窗口抓弹窗文本
+  （onefile 会派生子进程，按启动 PID 找窗口会漏）。
+- `gen_build_bat.py` 模板改为 4 步；不再用 `--clean`（bat 已自行清 build，
+  `--clean` 的批量删除在受管控环境会被拦）。
+- 同步修复 0.4.8 / 0.4.9（同源结构）；0.4.6 及更早没有 `injector_client.py`，不受影响。
+- 注入器 spec 补 `locales`；0.4.2 spec 补 `assets`/`config.json`。
+
+### 改名
+- 优化档位「激进档」→ **「极致档」**（避免词感）。同步 `perf_optimizer.py`、
+  UI 文案、CHANGELOG、`pingye/profiles/aggressive.json` 等共 17 处；
+  英文 key `aggressive` 不变，不影响已保存的应用状态。
+
+### 新增：离线化（免 Steam 启动 + 免服务器登录）
+- **离线模块**（`src/offline_crack.py`）：把之前在 `pojieexe/` 里验证过的离线方案做成修改器内置功能。
+  内置补丁放在 `assets/offline_crack/`（模拟器 `steam_api64.dll` + 4 个 lua 散文件），
+  不依赖外部目录，装完即用。
+- **离线面板**：侧边栏新增「🔓 离线」独立导航，4 个子项 ——
+  安装/卸载、状态总览、启动游戏、原理说明。每个子页顶部共用状态条
+  （dll 类型 / lua 就位数 / publish=0 / 备份有无 / 游戏与 Steam 进程）。
+- **一键安装 / 卸载还原**：备份原 dll → 放模拟器 → 部署 lua → 写 `publish=0`；
+  卸载则原路还原。游戏本体 exe **不做任何修改**。
+- **离线启动**：`launch()` 强制以 `bin64` 为工作目录拉起，避免闪退。
+- **登录诊断**：`last_login()` 解析最新 core 日志，直接读出
+  `login:true username:offlineuser ... online:false`，并检测
+  「第三方验证过期 / 重启后再试」这个服务端下发的提示串。
+- 单元测试 `tests/test_offline_crack.py`：21 项，覆盖补丁指纹、API 契约、
+  config.cfg 最小侵入、假目录里跑通安装/卸载互相抵消、UI 四子项渲染。
+
+### 修复
+- **导航索引错位（0.4.9 遗留 BUG）**：侧边栏第 3 位是「⚡优化」，但 `func_data[3]`
+  和 `_update_action_panel(3)` 仍是旧的「存档」——点「优化」弹出的是存档面板。
+  本版把三处顺序统一为 `0 主页 1 创造 2 工具 3 优化 4 存档 5 监控 6 内部 7 离线 8 设置`，
+  并新增 `test_nav_index_alignment` 断言「点优化不能出存档面板」，防止再犯。
+- **`config.cfg` 写 `publish=0` 破坏行尾**：原正则 `\s*$` 把 `\r` 吃进捕获组，
+  再拼 `\r\n` 后变成 `channel=11\r\r\n`。改为整行连行尾一起捕获后原样拼回，
+  LF 源文件也不会被引入 CRLF。
+- 顺带修掉 `src/offline_crack.py` 里几处 `open()` 未用 `with` 的文件句柄泄漏
+  （Windows 上会短暂锁住 config.cfg）。
+
+### 技术方案（写入面板「原理说明」）
+1. **第一层 · Lua 短路登录**：游戏用金山 XG SDK（`channel=11` = `XGJinShanWithSteamV2`），
+   正常流程是拿 Steam 票据去服务器换登录结果。「第三方验证过期」这句提示由服务端下发，
+   exe / config / lua 里三种编码全搜不到 —— 所以伪造票据无效，服务器不认。
+   正确做法是在 `sim_common` 散文件里把 `TryLogin` 短路，直接回调本地成功结果，
+   压根不发请求。
+2. **第二层 · Steam 模拟器 dll**：XG 的 `steam_service` 会调
+   `SteamAPI_RestartAppIfNecessary` 把 Steam 拉起来。自写 dll 让该接口返回 0，
+   并伪造 SteamID / AppID / 语言 / 昵称。这一层只负责「别唤醒 Steam」，不负责登录。
+3. **散文件优先级**：`游戏根\sim_common\script\**` 优先于 pak。证据：往
+   `xgagent_manager.lua` 插 2 行后，日志里 `user init` 行号从 `:173` 变 `:175`。
+
+### 边界
+- 云存档、成就、客服反馈等联机功能不可用。
+- 必须从修改器的「启动游戏」按钮启动或手动 `cd` 到 `bin64`，**不能从 Steam 库启动**。
+- 日志每 60 秒一次 `Start get ticket` 是后台刷新，无害噪音。
+
+### 版本
+- `APP_VERSION` / 安装包版本号 0.4.9 → 0.5.0。
+- 注入器 / 修改器拆分结构不变，`check_split.py` 仍 5/5。
+
+---
+
 ## v0.4.9 (2026-10-05)
 
 ### 新增

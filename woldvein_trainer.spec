@@ -62,6 +62,7 @@ a = Analysis(
         'src.hotkey_conflict',
         'src.theme_manager',
         'src.crash_report',
+        'src.offline_crack',
         'src.perf_optimizer',
         'tkinter.simpledialog',
     ],
@@ -88,7 +89,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX 压缩常被杀软误报、且每次启动还要解压，这里关闭
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
