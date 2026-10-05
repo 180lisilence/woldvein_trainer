@@ -175,9 +175,20 @@ class GameMonitor:
             for proc in psutil.process_iter(["pid", "name"]):
                 if proc.info["name"] and proc.info["name"].lower() == GAME_PROCESS_NAME.lower():
                     return proc.info["pid"]
+            return None          # psutil 可用但没枚举到 → 游戏确实没运行
         except Exception as e:
             if not self._find_pid_warned:
-                log_warning(f"查找游戏进程失败: {e}（psutil不可用或权限不足）")
+                log_warning(f"psutil 不可用（{e}），改用 Toolhelp32 枚举进程")
+        # 降级：Toolhelp32（纯 ctypes），不依赖 psutil
+        try:
+            from .injector import _toolhelp_processes
+            target = GAME_PROCESS_NAME.lower()
+            for pid, name in _toolhelp_processes():
+                if name.lower() == target:
+                    return pid
+        except Exception as e:
+            if not self._find_pid_warned:
+                log_warning(f"查找游戏进程失败: {e}")
                 self._find_pid_warned = True
         return None
 
