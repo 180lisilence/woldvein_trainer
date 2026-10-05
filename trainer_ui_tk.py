@@ -51,6 +51,18 @@ from src.operation_history import get_operation_history
 from src.hotkey_conflict import get_hotkey_detector
 from src.preset_manager import list_presets, save_preset, load_preset, delete_preset
 
+# 新增模块导入（v0.4.9 引擎性能优化）
+from src import perf_optimizer
+from src.perf_optimizer import (
+    PROFILES, PROFILE_ORDER,
+    apply_profile as perf_apply, restore as perf_restore,
+    read_current as perf_read, current_profile as perf_current,
+    recommend_profile as perf_recommend, set_single as perf_set_single,
+    set_gpu_preference as perf_set_gpu, disable_fullscreen_optimizations as perf_disable_fso,
+    hardware_summary as perf_hw, backup_info as perf_backup_info,
+    _dynamic_value as perf_dyn,
+)
+
 # ============================================================
 # 配色（微信风格）
 # ============================================================
@@ -340,7 +352,11 @@ class TrainerApp:
         self.sidebar = tk.Frame(parent, bg=COLORS["bg_sidebar"], width=90)
         self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
         self.sidebar.pack_propagate(False)
-        for i, (icon, name) in enumerate([("🏠","主页"),("✨","创造"),("🔧","工具"),("💾","存档"),("📊","监控"),("📦","内部")]):
+        # v0.4.9：新增「优化」独立导航（引擎性能优化），索引插在工具之后，
+        # 原「存档/监控/内部」顺延一位，设置由 6 变为 7，见 func_data 与 _update_action_panel。
+        NAV_ITEMS = [("🏠","主页"),("✨","创造"),("🔧","工具"),("⚡","优化"),
+                     ("💾","存档"),("📊","监控"),("📦","内部")]
+        for i, (icon, name) in enumerate(NAV_ITEMS):
             btn = tk.Button(self.sidebar, text=name, font=(FONT, 11), bg=COLORS["bg_sidebar"],
                           fg=COLORS["fg_sidebar"], bd=0, relief=tk.FLAT, cursor="hand2",
                           activebackground=COLORS["bg_sidebar_sel"], activeforeground=COLORS["fg_sidebar_sel"],
@@ -358,7 +374,7 @@ class TrainerApp:
         settings_btn = tk.Button(self.sidebar, text="设置", font=(FONT, 11), bg=COLORS["bg_sidebar"],
                                fg=COLORS["fg_sidebar"], bd=0, relief=tk.FLAT, cursor="hand2",
                                activebackground=COLORS["bg_sidebar_sel"], activeforeground=COLORS["fg_sidebar_sel"],
-                               command=lambda: self._switch_nav(6))
+                               command=lambda: self._switch_nav(7))
         settings_btn.pack(fill=tk.X, pady=4, padx=8)
         self.nav_buttons.append(settings_btn)
 
@@ -396,6 +412,8 @@ class TrainerApp:
         self.list_canvas.bind("<MouseWheel>", lambda e: self._on_mousewheel(e, self.list_canvas))
         self.list_inner.bind("<MouseWheel>", lambda e: self._on_mousewheel(e, self.list_canvas))
 
+        # v0.4.9 索引表（与 _build_sidebar 的 NAV_ITEMS 一一对应）
+        #   0 主页  1 创造  2 工具  3 存档  4 监控  5 内部  6 优化  7 设置
         self.func_data = {
             0: [("","游戏概览","查看游戏运行状态",False),("","快速操作","启动游戏/注入DLL",True)],
             1: [("","鸿业满级","鸿业等级满级",False),("","全建筑解锁","解锁所有建筑",False),
@@ -410,7 +428,11 @@ class TrainerApp:
                 ("","存档恢复","恢复备份",False),("","清理备份","清理旧备份",False)],
             4: [("","进程监控","内存/CPU/状态",False)],
             5: [("","资源修改","0.3.1 首页改资源面板（复刻）",False)],
-            6: [("","热键设置","全局热键",False),("","日志管理","日志路径",False),
+            6: [("","优化档位","保守/均衡/极致，改引擎出厂参数",False),
+                ("","改动明细","当前值 vs 目标值对照",False),
+                ("","系统侧优化","锁独显 / 关全屏优化",False),
+                ("","还原","回滚到备份的原始配置",False)],
+            7: [("","热键设置","全局热键",False),("","日志管理","日志路径",False),
                 ("","MOD管理","散文件MOD",False),("","关于","版本信息",False)],
         }
 
@@ -641,13 +663,15 @@ class TrainerApp:
         self._monitor_running = False
         for w in self.content_inner.winfo_children():
             w.destroy()
+        # v0.4.9：「优化」升为侧边栏独立导航（nav 6），设置顺延到 7
         if nav == 0: self._build_home()
         elif nav == 1: self._build_creative()
         elif nav == 2: self._build_tools(func)
         elif nav == 3: self._build_save(func)
         elif nav == 4: self._build_monitor()
         elif nav == 5: self._build_internal(func)
-        elif nav == 6: self._build_settings(func)
+        elif nav == 6: self._build_perf_tools(func)
+        elif nav == 7: self._build_settings(func)
         self._bind_mousewheel(self.content_inner, self.content_canvas)
         self._bind_mousewheel(self.content_inner, self.content_canvas)
 
@@ -1240,6 +1264,233 @@ class TrainerApp:
         for f in features:
             tk.Label(g2, text=f"  ✓ {f}", font=(FONT, 11), bg=COLORS["bg_card"],
                     fg=COLORS["success"], anchor="w").pack(fill=tk.X, anchor=tk.W, padx=20, pady=2)
+
+    # ===== 引擎性能优化（v0.4.9）=====
+    def _rebuild_current_page(self):
+        """重绘当前操作面板（改完配置后刷新显示）"""
+        try:
+            self._update_action_panel(self.current_nav, self.current_func, "")
+        except Exception:
+            pass
+
+    def _perf_info(self):
+        """读取一次当前状态，返回 (info, cur_name, cur_n, cur_t)"""
+        info = perf_read()
+        name, n, t = perf_current()
+        return info, name, n, t
+
+    def _build_perf_tools(self, func=0):
+        """
+        「优化」导航页渲染入口。中间栏有 4 个子项，按 func 分别渲染对应分区；
+        顶部状态条每段都会显示，保证切子项时上下文不丢。
+        """
+        builder = {
+            0: self._build_perf_profiles,
+            1: self._build_perf_detail,
+            2: self._build_perf_system,
+            3: self._build_perf_restore,
+        }.get(func, self._build_perf_profiles)
+
+        info = self._perf_draw_header()
+        if info is None:
+            return                      # 配置文件不可用，表头已给出错误提示
+        builder(info)
+
+    def _perf_draw_header(self):
+        """渲染每个优化子页共用的顶部状态条。返回 info；配置不可用时返回 None。"""
+        info, cur_name, cur_n, cur_t = self._perf_info()
+        g = self._group("🖥️ 本机概览")
+        try:
+            hw = perf_hw()
+        except Exception:
+            hw = "（硬件信息不可用）"
+        tk.Label(g, text=hw, font=(FONT, 11), bg=COLORS["bg_card"],
+                fg=COLORS["fg"], anchor="w").pack(fill=tk.X, padx=16, pady=(6, 2))
+        rec, why = perf_recommend()
+        tk.Label(g, text=f"推荐：{why}", font=(FONT, 11), bg=COLORS["bg_card"],
+                fg=COLORS["success"], anchor="w").pack(fill=tk.X, padx=16, pady=(0, 6))
+        if not info["ok"]:
+            tk.Label(g, text=info["msg"], font=(FONT, 11), bg=COLORS["bg_card"],
+                     fg=COLORS["error"], justify=tk.LEFT, anchor="w").pack(fill=tk.X, padx=16, pady=6)
+            return None
+        state_txt = (f"当前已应用：{PROFILES.get(cur_name, {}).get('display', cur_name or '未应用')}"
+                     f"  （{cur_n}/{cur_t} 项符合）") if cur_name else "当前未应用任何优化档"
+        tk.Label(g, text=state_txt, font=(FONT, 11, "bold"), bg=COLORS["bg_card"],
+                fg=COLORS["accent"] if cur_name else COLORS["fg_muted"],
+                anchor="w").pack(fill=tk.X, padx=16, pady=(0, 4))
+        return info
+
+    def _build_perf_profiles(self, info):
+        """子项 0：优化档位（三档切换 + 建议值预览）"""
+        _, cur_name, _, _ = self._perf_info()
+        rec, _ = perf_recommend()
+
+        g2 = self._group("⚡ 优化档位")
+        for name in PROFILE_ORDER:
+            p = PROFILES[name]
+            row = tk.Frame(g2, bg=COLORS["bg_card"])
+            row.pack(fill=tk.X, padx=16, pady=6)
+
+            is_cur = (name == cur_name)
+            style = "primary" if is_cur else "normal"
+            label = f"{'✓ ' if is_cur else ''}{p['display']}"
+            self._btn(row, label, style,
+                      lambda n=name: self._on_apply_perf(n)).pack(side=tk.LEFT, padx=(0, 10))
+
+            tk.Label(row, text=p["desc"], font=(FONT, 10), bg=COLORS["bg_card"],
+                    fg=COLORS["fg_muted"], anchor="w", justify=tk.LEFT,
+                    wraplength=520).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        dyn = ", ".join(f"{k}={perf_dyn(k, rec)}" for k in ("NumCpuThread", "MinWorkSet", "MaxWorkSet"))
+        tk.Label(g2, text=f"按本机自动计算的建议值：{dyn}", font=(FONT, 10),
+                bg=COLORS["bg_card"], fg=COLORS["fg_muted"], anchor="w",
+                justify=tk.LEFT).pack(fill=tk.X, padx=16, pady=(4, 6))
+
+        self._build_perf_notes()
+
+    def _build_perf_detail(self, info):
+        """子项 1：改动明细（当前值 vs 目标值 + 逆向依据）"""
+        _, cur_name, _, _ = self._perf_info()
+        rec, _ = perf_recommend()
+        show = cur_name if cur_name in PROFILES else rec
+
+        g3 = self._group(f"📋 {PROFILES[show]['display']} · 改动明细")
+        head = tk.Frame(g3, bg=COLORS["bg_card"])
+        head.pack(fill=tk.X, padx=16, pady=(4, 2))
+        for txt, w in (("项目", 26), ("当前值", 10), ("目标值", 10)):
+            tk.Label(head, text=txt, width=w, font=(FONT, 10, "bold"),
+                    bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                    anchor="w").pack(side=tk.LEFT)
+        for c in PROFILES[show]["changes"]:
+            want = c["value"] or perf_dyn(c["key"], show)
+            have = info["values"].get((c["section"], c["key"]))
+            ok = (str(have) == str(want))
+            row = tk.Frame(g3, bg=COLORS["bg_card"])
+            row.pack(fill=tk.X, padx=16, pady=1)
+            tk.Label(row, text=c.get("label", c["key"]), width=26, font=(FONT, 10),
+                    bg=COLORS["bg_card"], fg=COLORS["fg"], anchor="w").pack(side=tk.LEFT)
+            tk.Label(row, text=str(have if have is not None else "—"), width=10, font=(FONT, 10),
+                    bg=COLORS["bg_card"], fg=COLORS["fg_muted"], anchor="w").pack(side=tk.LEFT)
+            tk.Label(row, text=str(want), width=10, font=(FONT, 10),
+                    bg=COLORS["bg_card"], fg=COLORS["success"] if ok else COLORS["warning"],
+                    anchor="w").pack(side=tk.LEFT)
+
+        g3b = self._group("📄 各项依据（逆向证据）")
+        for c in PROFILES[show]["changes"]:
+            row = tk.Frame(g3b, bg=COLORS["bg_card"])
+            row.pack(fill=tk.X, padx=16, pady=2)
+            tk.Label(row, text=c.get("label", c["key"]), width=26, font=(FONT, 10),
+                    bg=COLORS["bg_card"], fg=COLORS["fg"], anchor="w").pack(side=tk.LEFT)
+            tk.Label(row, text=c.get("evidence", ""), font=(FONT, 9),
+                    bg=COLORS["bg_card"], fg=COLORS["fg_muted"], anchor="w",
+                    justify=tk.LEFT, wraplength=560).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._build_perf_notes()
+
+    def _build_perf_system(self, info):
+        """子项 2：系统侧优化（锁独显 / 关全屏优化）"""
+        g4 = self._group("🖥️ 系统侧优化（双显卡笔记本必看）")
+        bf4 = tk.Frame(g4, bg=COLORS["bg_card"])
+        bf4.pack(fill=tk.X, padx=16, pady=10)
+        self._btn(bf4, "🎮 锁定高性能独显", "primary", self._on_perf_gpu).pack(side=tk.LEFT, padx=5)
+        self._btn(bf4, "🪟 关闭全屏优化", "normal", self._on_perf_fso).pack(side=tk.LEFT, padx=5)
+        tk.Label(g4, text="游戏跑在集显上是笔记本「优化差」最常见的原因。这两项改注册表后对下次启动生效，无需重装驱动。",
+                font=(FONT, 10), bg=COLORS["bg_card"], fg=COLORS["fg_muted"],
+                anchor="w", justify=tk.LEFT, wraplength=620).pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        g4b = self._group("📂 配置位置")
+        tk.Label(g4b, text=info["ini"], font=(FONT, 10), bg=COLORS["bg_card"],
+                fg=COLORS["fg"], anchor="w", justify=tk.LEFT,
+                wraplength=620).pack(fill=tk.X, padx=16, pady=6)
+
+        self._build_perf_notes()
+
+    def _build_perf_restore(self, info):
+        """子项 3：还原"""
+        g5 = self._group("↩ 还原")
+        bk = perf_backup_info()
+        bk_txt = (f"备份可用（{bk['created']}，{bk['size']} 字节）\n{bk['path']}"
+                  if bk else "尚无备份（首次应用时自动创建）")
+        tk.Label(g5, text=bk_txt, font=(FONT, 10), bg=COLORS["bg_card"],
+                fg=COLORS["fg_muted"], anchor="w", justify=tk.LEFT,
+                wraplength=620).pack(fill=tk.X, padx=16, pady=(4, 6))
+        bf5 = tk.Frame(g5, bg=COLORS["bg_card"])
+        bf5.pack(fill=tk.X, padx=16, pady=(0, 10))
+        self._btn(bf5, "↩ 一键还原到备份", "danger", self._on_perf_restore).pack(side=tk.LEFT, padx=5)
+        self._btn(bf5, "🔄 刷新状态", "normal", self._rebuild_current_page).pack(side=tk.LEFT, padx=5)
+
+        self._build_perf_notes()
+
+    def _build_perf_notes(self):
+        """各优化子页底部共用的说明"""
+        g6 = self._group("ℹ️ 说明")
+        for line in [
+            "· 本页改的是游戏 configs\\config.ini，属启动期配置 —— 改动后必须重启游戏才生效。",
+            "· 与 Lua 注入是两条独立通道：注入改运行期内存，这里改引擎出厂参数。",
+            "· 已验证：游戏不会把 config.ini 写回去，改值不会被覆盖。",
+            "· 无效项提醒：config.cfg 的 LogicFrame / RenderFrame 没有任何代码读取，改它不会解锁帧率。",
+            "· 若出现物件闪烁或贴图错乱，先把「剔除多线程 / 资源加载多线程」改回 0，或直接一键还原。",
+        ]:
+            tk.Label(g6, text=line, font=(FONT, 10), bg=COLORS["bg_card"],
+                    fg=COLORS["fg_muted"], anchor="w", justify=tk.LEFT,
+                    wraplength=640).pack(fill=tk.X, padx=16, pady=1)
+
+    def _on_apply_perf(self, name):
+        """应用某一档"""
+        info, cur_name, _, _ = self._perf_info()
+        if not info["ok"]:
+            messagebox.showerror("无法应用", info["msg"])
+            return
+        p = PROFILES[name]
+        detail = "\n".join(
+            f"· {c.get('label', c['key'])} = {c['value'] or perf_dyn(c['key'], name)}"
+            for c in p["changes"]
+        )
+        if not messagebox.askyesno(
+            f"应用 {p['display']}",
+            f"{p['desc']}\n\n将写入以下 {len(p['changes'])} 项：\n{detail}\n\n"
+            f"改动前会自动备份原始配置。\n配置在启动时读取，需重启游戏生效。\n\n确定应用？"):
+            return
+        res = perf_apply(name, dry_run=False)
+        if res["ok"]:
+            log_success(f"[引擎优化] {p['display']} 已应用")
+            tip = res["msg"]
+            try:
+                if perf_optimizer.is_game_running():
+                    tip += "\n\n检测到游戏正在运行 —— 请先关闭游戏再重新启动，改动才会生效。"
+            except Exception:
+                pass
+            messagebox.showinfo("应用完成", tip)
+        else:
+            messagebox.showerror("应用失败", res.get("msg", "未知错误"))
+            log_error(f"[引擎优化] 应用失败: {res.get('msg')}")
+        self._rebuild_current_page()
+
+    def _on_perf_restore(self):
+        """还原到备份"""
+        if not messagebox.askyesno("还原配置", "确定要把游戏配置还原到备份的原始版本吗？\n\n此操作会撤销本页做过的全部优化改动。"):
+            return
+        res = perf_restore()
+        if res["ok"]:
+            log_success("[引擎优化] 已还原")
+            messagebox.showinfo("还原完成", res["msg"])
+        else:
+            messagebox.showinfo("还原", res["msg"])
+        self._rebuild_current_page()
+
+    def _on_perf_gpu(self):
+        res = perf_set_gpu()
+        if res["ok"]:
+            messagebox.showinfo("完成", res["msg"])
+        else:
+            messagebox.showerror("失败", res["msg"])
+
+    def _on_perf_fso(self):
+        res = perf_disable_fso()
+        if res["ok"]:
+            messagebox.showinfo("完成", res["msg"])
+        else:
+            messagebox.showerror("失败", res["msg"])
 
     # ===== 存档页 =====
     def _build_save(self, func):

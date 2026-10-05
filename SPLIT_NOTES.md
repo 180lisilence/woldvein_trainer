@@ -1,4 +1,4 @@
-# woldvein_trainer v0.4.8 — 拆分说明
+# woldvein_trainer v0.4.8 — 拆分说明（v0.4.9 沿用此结构）
 
 本版本最大的变化：**修改器不再自己注入。**
 

@@ -11,7 +11,7 @@ woldvein_trainer v0.5.0 — 注入器客户端
 定位顺序：
     1) 环境变量 WOLDVEIN_INJECTOR_HOME
     2) 同级归集目录：trainers/injector/woldvein_injector0.4.7
-    3) 本项目内嵌：woldvein_trainer0.4.8/vendor/woldvein_injector0.4.7
+    3) 本项目内嵌：woldvein_trainer0.4.9/vendor/woldvein_injector0.4.7
 
 这样做的收益：注入器改 DLL、换通信协议、加绕检测都不需要动修改器一行代码，
 只要 PROTOCOL_VERSION 不变。
@@ -37,7 +37,7 @@ def _candidate_paths():
     trainers/injector/<name>，让它无论从工作区还是从拷贝出去的 dist 启动都能找到。
     """
     here = os.path.dirname(os.path.abspath(__file__))          # .../src
-    trainer_root = os.path.dirname(here)                        # .../woldvein_trainer0.4.8
+    trainer_root = os.path.dirname(here)                        # .../woldvein_trainer0.4.9
     paths = []
 
     env = os.environ.get("WOLDVEIN_INJECTOR_HOME")
